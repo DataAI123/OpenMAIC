@@ -201,6 +201,13 @@ interface ReadOptions {
   months?: string[];
   /** Return only rows attributed to this server-resolved owner. */
   ownerId?: string;
+  /**
+   * Return only rows attributed to this server-resolved tenant. Rows recorded
+   * without a tenant (legacy or unattributed) are excluded rather than treated
+   * as a match, so a tenant-scoped read is fail-closed instead of silently
+   * falling back to a tenant-blind view.
+   */
+  tenantId?: string;
 }
 
 /**
@@ -235,6 +242,7 @@ export async function readUsageRecords(opts: ReadOptions = {}): Promise<UsageRec
         const row = JSON.parse(trimmed) as UsageRecord;
         if (!row.kind) row.kind = 'llm'; // backward-compat
         if (opts.ownerId !== undefined && row.ownerId !== opts.ownerId) continue;
+        if (opts.tenantId !== undefined && row.tenantId !== opts.tenantId) continue;
         records.push(row);
       } catch {
         // skip malformed line

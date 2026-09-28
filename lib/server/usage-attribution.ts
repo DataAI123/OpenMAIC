@@ -47,11 +47,15 @@ export function currentUsageAttribution(): UsageAttribution | undefined {
 }
 
 /**
- * Derive attribution from an already-resolved owner id. OIDC `user:` owners map
- * to the controlled `default` tenant; legacy `anon:` / `public:` owners record
- * no tenant. The owner id must come from server session resolution — this
+ * Derive attribution from an already-resolved owner id. An explicit `tenantId`
+ * — always a server-resolved session or claimed-session value — wins, so a user
+ * acting in a non-default tenant is attributed to the tenant they acted in.
+ * Callers that only know the owner id fall back to the phase-1 mapping: `user:`
+ * owners to the controlled `default` tenant, legacy `anon:` / `public:` owners
+ * to no tenant. The owner id must come from server session resolution — this
  * helper performs no trust of its own.
  */
-export function attributionForOwner(ownerId: string): UsageAttribution {
+export function attributionForOwner(ownerId: string, tenantId?: string): UsageAttribution {
+  if (tenantId) return { ownerId, tenantId };
   return ownerId.startsWith(OIDC_USER_PREFIX) ? { ownerId, tenantId: DEFAULT_TENANT } : { ownerId };
 }

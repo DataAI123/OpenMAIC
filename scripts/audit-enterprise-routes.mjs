@@ -173,7 +173,7 @@ function policyFor(route, method) {
     }
     return '视频渲染任务：app 侧已持久绑定 job→owner（迁移 0009）且入口已开放；渲染服务 job store 为进程内存，compose 关闭 per-client 活跃任务限额；终态默认保留 30 分钟；用户并发政策仍未定案';
   }
-  if (route === '/usage') return '用量级：认证主体 + 用户/组织范围，不接受客户端归属';
+  if (route === '/usage') return '用量级：认证主体 + 用户/租户范围，不接受客户端归属';
   if (
     route.startsWith('/generate') ||
     route.startsWith('/chat') ||
@@ -278,7 +278,7 @@ function oidcGateFor(route, method) {
   ) {
     if (route === '/usage') {
       return method === 'GET'
-        ? '精确 GET：签名应用会话 + Node 层数据库 session/成员资格复核；只返回当前用户归属用量，legacy anonymous owner 拒绝'
+        ? '精确 GET：签名应用会话 + Node 层数据库 session/成员资格复核；只返回当前用户在 session 所处租户的用量（owner + tenant 双过滤），legacy anonymous owner 拒绝'
         : 'OIDC 下 503：仅受控 GET 已开放';
     }
     if (route === '/agent/runtime') return '签名应用会话；仅返回非用户特定的功能状态';

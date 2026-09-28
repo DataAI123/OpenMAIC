@@ -87,6 +87,13 @@ describe('attributionForOwner', () => {
     expect(attributionForOwner('user:abc')).toEqual({ ownerId: 'user:abc', tenantId: 'default' });
   });
 
+  it('prefers an explicit tenant so a user in two tenants is attributed correctly', () => {
+    expect(attributionForOwner('user:abc', 'tenant-b')).toEqual({
+      ownerId: 'user:abc',
+      tenantId: 'tenant-b',
+    });
+  });
+
   it('leaves legacy anonymous and public owners without a tenant', () => {
     expect(attributionForOwner('anon:xyz')).toEqual({ ownerId: 'anon:xyz' });
     expect(attributionForOwner('public:anonymous')).toEqual({ ownerId: 'public:anonymous' });

@@ -1894,10 +1894,12 @@ export function startAgentRunner(): AgentRunnerHandle {
         if (ctx.running.has(meta.id)) continue;
         log.info(`claiming ${meta.id} (attempt ${meta.attempt})`);
         // Attribute every LLM/tool call this session runs to the claimed
-        // durable session's owner. The detached runner is outside the HTTP
-        // request scope, so it establishes its own usage-attribution context
-        // from `meta.ownerId` (never client input) around the whole run.
-        void runWithUsageAttribution(attributionForOwner(meta.ownerId), () =>
+        // durable session's owner *and tenant*. The detached runner is outside
+        // the HTTP request scope, so it establishes its own usage-attribution
+        // context from the claimed metadata (never client input) around the
+        // whole run. `meta.tenantId` is the session's own tenant, so a user in
+        // two tenants records each run under the tenant it ran in.
+        void runWithUsageAttribution(attributionForOwner(meta.ownerId, meta.tenantId), () =>
           runSession(ctx, meta),
         ).catch((error) => {
           log.error(`runSession ${meta.id} crashed`, error);

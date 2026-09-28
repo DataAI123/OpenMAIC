@@ -71,20 +71,23 @@ function dayKey(createdAt: number): string {
  * GET /api/usage
  *
  * Aggregates usage by model, day, and modality. In OIDC mode only rows for the
- * authenticated owner are included; legacy mode retains its deployment-wide
- * view. Pure usage — no cost. Optional `?months=YYYY-MM,...`.
+ * authenticated owner *in the tenant the session is acting in* are included, so
+ * one user who belongs to two tenants sees each tenant's spend separately;
+ * legacy mode retains its deployment-wide view. Pure usage — no cost. Optional
+ * `?months=YYYY-MM,...`.
  */
 export async function GET(req: NextRequest) {
-  return withRequestOwnerId(req, async (ownerId, responseHeaders) => {
+  return withRequestOwnerId(req, async (ownerId, responseHeaders, identity) => {
     try {
       const monthsParam = req.nextUrl.searchParams.get('months');
       const months = monthsParam ? monthsParam.split(',').map((s) => s.trim()) : undefined;
-      // OIDC owner ids are derived from a database-backed application session
-      // in withRequestOwnerId. Never use a caller-supplied owner/tenant filter.
-      // Keep the legacy dashboard contract unchanged during migration.
+      // The owner and tenant ids are derived from a database-backed application
+      // session in withRequestOwnerId. Never use a caller-supplied owner/tenant
+      // filter. Keep the legacy dashboard contract unchanged during migration.
       const records = await readUsageRecords({
         months,
         ...(ownerId.startsWith('user:') ? { ownerId } : {}),
+        ...(identity?.tenantId ? { tenantId: identity.tenantId } : {}),
       });
 
       const byModel = new Map<string, Bucket>();

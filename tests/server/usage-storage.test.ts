@@ -209,4 +209,28 @@ describe('readUsageRecords', () => {
     expect(records).toHaveLength(1);
     expect(records[0].ownerId).toBe('user:alice');
   });
+
+  it('separates one user’s usage by tenant and excludes tenant-less rows', async () => {
+    await runWithUsageAttribution({ ownerId: 'user:alice', tenantId: 'tenant-a' }, () =>
+      recordUsage({ ...llmInput, source: 'tenant-a-run' }, { baseDir: tmpDir }),
+    );
+    await runWithUsageAttribution({ ownerId: 'user:alice', tenantId: 'tenant-b' }, () =>
+      recordUsage({ ...llmInput, source: 'tenant-b-run' }, { baseDir: tmpDir }),
+    );
+    // A row the same owner recorded without a tenant context (e.g. an
+    // unattributed legacy write) must not leak into a tenant-scoped read.
+    await runWithUsageAttribution({ ownerId: 'user:alice' }, () =>
+      recordUsage({ ...llmInput, source: 'tenant-less-run' }, { baseDir: tmpDir }),
+    );
+
+    const tenantA = await readUsageRecords({
+      baseDir: tmpDir,
+      ownerId: 'user:alice',
+      tenantId: 'tenant-a',
+    });
+
+    expect(tenantA).toHaveLength(1);
+    expect(tenantA[0].source).toBe('tenant-a-run');
+    expect(tenantA[0].tenantId).toBe('tenant-a');
+  });
 });

@@ -357,11 +357,33 @@ The column is also declared (unconditionally, without the foreign key) in each
 package's own schema, so a database that initializes the schema before the
 migration still passes and the two orders converge.
 
-**Known residual.** The usage reader (`lib/server/usage-storage.ts`) records the
-server-derived `ownerId`/`tenantId` on every row but filters reads by `ownerId`
-only, so a multi-tenant user's usage is aggregated by owner at read time. The
-per-row tenant is retained for downstream attribution; a tenant-filtered read is
-left for a later batch.
+#### Usage attribution tenant boundary (batch 24)
+
+This closes the residual left open after batch 22. Usage rows already carried the
+server-derived owner and tenant; batch 24 makes both the write and the read
+tenant-correct.
+
+- **Write.** `attributionForOwner(ownerId, tenantId?)`
+  (`lib/server/usage-attribution.ts`) now prefers an explicit, server-resolved
+  tenant over the phase-1 `default` fallback, and the detached runner passes the
+  claimed session's `meta.tenantId` (`runner.ts`). A user who belongs to two
+  tenants therefore records each run under the tenant it actually ran in,
+  instead of every run landing in `default`. The HTTP request boundary
+  (`withRequestOwnerId`) already used the session tenant directly, and the
+  classroom job runner already passes the job identity verbatim.
+- **Read.** `readUsageRecords({ tenantId })` filters on the row's `tenantId`, and
+  `GET /api/usage` passes the session tenant through `withRequestOwnerId`. A row
+  written without a tenant (legacy or unattributed) does **not** match a
+  tenant-scoped read, so the read fails closed rather than silently falling back
+  to a tenant-blind aggregate. Both filters remain optional: omitting the tenant
+  reproduces the previous owner-only read byte for byte, so a legacy deployment
+  keeps its deployment-wide view.
+
+**Not a boundary leak, still open:** the per-user monthly LLM token quota
+(`lib/server/personal-llm-quota`) is keyed by `user:<id>` alone, so a user's
+tenants share one budget. That is a quota/product decision rather than
+cross-tenant data access, and belongs with the operations work (quotas,
+spend caps and persistent usage).
 
 #### Process-local state and cache keys: audit conclusion
 

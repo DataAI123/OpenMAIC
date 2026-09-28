@@ -93,6 +93,19 @@ describe('GET /api/usage', () => {
     expect(response.headers.get('cache-control')).toBe('no-store');
   });
 
+  it('scopes an authenticated read to the tenant the session is acting in', async () => {
+    vi.mocked(withRequestOwnerId).mockImplementationOnce(async (_request, handler) =>
+      handler('user:alice', new Headers(), { ownerId: 'user:alice', tenantId: 'tenant-b' }),
+    );
+
+    await GET(new NextRequest('http://localhost/api/usage'));
+
+    expect(readUsageRecords).toHaveBeenLastCalledWith({
+      ownerId: 'user:alice',
+      tenantId: 'tenant-b',
+    });
+  });
+
   it('preserves the legacy deployment-wide usage view', async () => {
     const legacyHeaders = new Headers({ 'Set-Cookie': 'openmaic_owner=anon-owner' });
     vi.mocked(withRequestOwnerId).mockImplementationOnce(async (_request, handler) =>
