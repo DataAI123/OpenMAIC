@@ -15,6 +15,12 @@ export async function register(): Promise<void> {
   // want; the persistence stack is Node-only.
   if (process.env.NEXT_RUNTIME !== 'nodejs') return;
 
+  // Validate the selected identity mode before accepting requests. This is
+  // deliberately configuration-only: discovery outages must not switch the
+  // application back to the legacy access-code gate.
+  const { resolveAuthConfig } = await import('@/lib/server/auth/config');
+  resolveAuthConfig();
+
   const { warnIfAccessCodeIsUnset } = await import('@/lib/server/access-code-warning');
   warnIfAccessCodeIsUnset(process.env.ACCESS_CODE);
 

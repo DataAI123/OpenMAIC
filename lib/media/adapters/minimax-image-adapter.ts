@@ -10,6 +10,7 @@ import type {
   ImageGenerationResult,
 } from '../types';
 import { requireModel } from '../require-model';
+import { imageProviderFetch } from '../provider-fetch';
 
 const BASE_URL = 'https://api.minimaxi.com';
 
@@ -23,7 +24,7 @@ export async function generateWithMiniMaxImage(
 
   const aspectRatio = options.aspectRatio || '1:1';
 
-  const response = await fetch(`${baseUrl}/v1/image_generation`, {
+  const response = await imageProviderFetch(config, `${baseUrl}/v1/image_generation`, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${config.apiKey}`,

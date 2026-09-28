@@ -18,6 +18,7 @@ import {
 import type { CourseRef } from '@/lib/workbench/course-refs';
 import { workspaceHref } from '@/lib/workbench/workspace-panes';
 import { useI18n } from '@/lib/hooks/use-i18n';
+import { isLoginRequiredFailure, redirectToLogin } from '@/lib/auth/client-login';
 
 // Older deployed home composers may still write this key during a rolling deploy.
 const LEGACY_LAUNCH_HANDOFF_KEY = 'workbench.launchPrompt';
@@ -92,6 +93,13 @@ export function WorkbenchLaunchBridge() {
         router.replace(workspaceHref({ sessionId: session.id, courseId: null }));
       })
       .catch((cause: unknown) => {
+        if (
+          cause instanceof WorkbenchApiError &&
+          isLoginRequiredFailure(cause.status, cause.errorCode)
+        ) {
+          redirectToLogin();
+          return;
+        }
         if (
           skill &&
           cause instanceof WorkbenchApiError &&

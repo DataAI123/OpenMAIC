@@ -4,8 +4,9 @@
  * `learnerKey` partitions all learner-runtime data (RuntimeStore sessions).
  * Until sign-in exists it is a per-device anonymous key: minted once and kept
  * in the KV `device` scope, which never syncs across devices — a synced key
- * would merge two people's runtime into one partition. When sign-in lands,
- * `RuntimeStore.mergeLearner(anonKey, accountKey)` is the migration path.
+ * would merge two people's runtime into one partition. In OIDC mode the
+ * server-provided internal user identity is used for remote runtime requests;
+ * existing anonymous runtime data is not automatically claimed or merged.
  *
  * Client-only: the default KV store lazily touches `localStorage`. Server
  * code must not import this without injecting its own `KVStore`.
@@ -21,9 +22,11 @@ const LEARNER_KEY_LOCK = 'maic:learner-key';
 let defaultKv: KVStore | undefined;
 let defaultInFlight: Promise<string> | undefined;
 let configuredInFlight: Promise<string> | undefined;
+let authenticatedInFlight: Promise<string | null> | undefined;
 
 registerRuntimeStorageResetHook(() => {
   configuredInFlight = undefined;
+  authenticatedInFlight = undefined;
   defaultInFlight = undefined;
   defaultKv = undefined;
 });
@@ -79,6 +82,54 @@ async function readOrMint(store: KVStore): Promise<string> {
  * configuration module; reload after changing bootstrap configuration.
  */
 export function getLearnerKey(kv?: KVStore): Promise<string> {
+  if (typeof window !== 'undefined') {
+    authenticatedInFlight ??= fetch('/api/auth/session', {
+      cache: 'no-store',
+      credentials: 'same-origin',
+    })
+      .then(async (response) => {
+        if (!response.ok) throw new Error('AUTH_UNAVAILABLE');
+        const body = (await response.json()) as {
+          mode?: unknown;
+          status?: unknown;
+          userId?: unknown;
+        };
+        if (body.mode === 'legacy') return null;
+        if (
+          body.mode === 'oidc' &&
+          body.status === 'authenticated' &&
+          typeof body.userId === 'string' &&
+          body.userId.length > 0 &&
+          body.userId.length <= 128
+        ) {
+          return `user:${body.userId}`;
+        }
+        throw new Error(body.status === 'unavailable' ? 'AUTH_UNAVAILABLE' : 'LOGIN_REQUIRED');
+      })
+      .catch((error) => {
+        authenticatedInFlight = undefined;
+        throw error;
+      });
+
+    return authenticatedInFlight.then((authenticatedKey) => {
+      if (authenticatedKey) return authenticatedKey;
+      if (kv) return readOrMint(kv);
+      const configured = configuredInFlight ?? resolveConfiguredLearnerKey();
+      if (configured) {
+        configuredInFlight ??= configured.catch((error) => {
+          configuredInFlight = undefined;
+          throw error;
+        });
+        return configuredInFlight;
+      }
+      defaultInFlight ??= readOrMint((defaultKv ??= new BrowserKVStore())).catch((error) => {
+        defaultInFlight = undefined;
+        throw error;
+      });
+      return defaultInFlight;
+    });
+  }
+
   // Injected stores (tests, server-side callers) bypass the memo but stay
   // race-safe through the lock / read-after-write above.
   if (kv) return readOrMint(kv);

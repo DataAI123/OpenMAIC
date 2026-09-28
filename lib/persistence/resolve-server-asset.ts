@@ -14,6 +14,7 @@
  */
 import { AssetNotFoundError, toAssetId, type AssetPrincipal } from '@openmaic/storage';
 
+import { resolveOidcAssetPrincipal } from './oidc-asset-access';
 import { authenticatePersistenceHeaders } from './server-auth';
 import { getServerPersistenceProvider } from './server-provider';
 
@@ -39,26 +40,35 @@ export async function resolveServerAsset(
   assetId: string,
   headers: Headers,
   maxByteLength?: number,
+  authenticatedOwnerId?: string,
 ): Promise<ServerAssetResolution> {
   const connectionString = process.env.DATABASE_URL;
   if (!connectionString) return { status: 'unconfigured' };
 
-  // Shared-partition development auth: this authenticator maps every caller to
-  // one 'shared' asset principal (see the server-auth.ts docstring). It is the
-  // documented stopgap for this deployment shape — its cost surface is
-  // accepted until real per-learner principals land in a later part of the
-  // RFC; do not extend it here.
-  const principal = authenticatePersistenceHeaders(headers);
-  // The authenticator always supplies a partition key on success, but its type
-  // leaves it optional; a keyless principal fails closed as unauthenticated.
-  if (!principal?.key) return { status: 'unauthenticated' };
-  const assetPrincipal: AssetPrincipal = {
-    key: principal.key,
-    ...(principal.learnerKey ? { learnerKey: principal.learnerKey } : {}),
-  };
-
   try {
     const provider = await getServerPersistenceProvider(connectionString);
+    let assetPrincipal: AssetPrincipal | undefined;
+    if (authenticatedOwnerId !== undefined) {
+      if (!authenticatedOwnerId.startsWith('user:') || authenticatedOwnerId.length === 5) {
+        return { status: 'unauthenticated' };
+      }
+      assetPrincipal = await resolveOidcAssetPrincipal(provider.pool, authenticatedOwnerId, {
+        method: 'GET',
+        url: `http://persistence.internal/api/persistence/assets/${encodeURIComponent(assetId)}/content`,
+      });
+      if (!assetPrincipal) return { status: 'missing' };
+    } else {
+      // Shared-partition development auth remains the legacy compatibility
+      // path. OIDC callers must supply their verified owner id above; they may
+      // never fall back to the client-visible persistence credential.
+      const principal = authenticatePersistenceHeaders(headers);
+      if (!principal?.key) return { status: 'unauthenticated' };
+      assetPrincipal = {
+        key: principal.key,
+        ...(principal.learnerKey ? { learnerKey: principal.learnerKey } : {}),
+      };
+    }
+
     const ref = toAssetId(assetId);
     // Size check BEFORE materialization: `identify` reads only the registry
     // row (recorded byte length), never the bytes, so an oversized asset is

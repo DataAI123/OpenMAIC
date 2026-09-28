@@ -25,9 +25,10 @@ export type OwnerScopedDocumentStore = DocumentStore<AppScene, AppStage> &
  *
  * This is the exact seam the agent runner uses (`runner.ts`): the document
  * provider is bound to the resolved owner through the stage access layer.
- * Reads are capability-by-id, writes and listings are owner-only, and every
- * operation re-checks `stage_meta` inside its transaction. A browser holding a
- * course id may therefore read it without gaining mutation authority.
+ * Reads are owner-or-public when enterprise enforcement is enabled; legacy
+ * mode preserves capability-by-id reads unless the operator opts in. Writes
+ * and listings are owner-only, and every document operation re-checks
+ * `stage_meta` inside its transaction.
  * `withPlainJsonDocumentWrites` keeps the write
  * boundary identical to the agent tools' (undefined-valued members are never
  * persisted as JSON nulls).
@@ -35,12 +36,14 @@ export type OwnerScopedDocumentStore = DocumentStore<AppScene, AppStage> &
 export async function getOwnerScopedDocumentStore(
   ownerId: string,
   mutationFence?: (queryable: Queryable) => Promise<void>,
+  tenantId?: string,
 ): Promise<OwnerScopedDocumentStore> {
   const { pool } = await getServerPersistenceProvider(process.env.DATABASE_URL ?? '');
   return withPlainJsonDocumentWrites(
     createOwnerBoundDocumentStore<AppScene, AppStage>({
       pool,
       ownerId,
+      ...(tenantId === undefined ? {} : { tenantId }),
       validateScene: validateAppScene,
       validateStage: validateAppStage,
       mutationFence,

@@ -7,6 +7,8 @@ const mocks = vi.hoisted(() => ({
   realpath: vi.fn(),
   stat: vi.fn(),
   createReadStream: vi.fn(),
+  readClassroom: vi.fn(),
+  identity: { ownerId: 'anon:media-test' } as { ownerId: string; tenantId?: string },
 }));
 
 vi.mock('fs', () => ({
@@ -21,6 +23,22 @@ vi.mock('@/lib/logger', () => ({
     error: vi.fn(),
     debug: vi.fn(),
   }),
+}));
+
+vi.mock('@/lib/server/classroom-storage', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/server/classroom-storage')>()),
+  readClassroom: mocks.readClassroom,
+}));
+
+vi.mock('@/lib/server/agent-runtime/with-owner', () => ({
+  withRequestOwnerId: async (
+    _req: Request,
+    handler: (
+      ownerId: string,
+      responseHeaders: Headers,
+      identity?: { ownerId: string; tenantId?: string },
+    ) => Promise<Response>,
+  ) => handler(mocks.identity.ownerId, new Headers(), mocks.identity),
 }));
 
 import { GET } from '@/app/api/classroom-media/[classroomId]/[...path]/route';
@@ -51,6 +69,8 @@ function get(range?: string) {
 describe('GET /api/classroom-media range support', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.identity = { ownerId: 'anon:media-test' };
+    mocks.readClassroom.mockResolvedValue(null);
     mocks.realpath.mockResolvedValue(path.join(CLASSROOMS_DIR, CLASSROOM_ID, 'media', 'clip.mp4'));
     mocks.stat.mockResolvedValue({ isFile: () => true, size: FILE_SIZE });
     mocks.createReadStream.mockImplementation((_file: string, options?: { start?: number }) =>
@@ -119,5 +139,43 @@ describe('GET /api/classroom-media range support', () => {
 
     expect(res.status).toBe(200);
     expect(res.headers.get('Content-Length')).toBe(String(FILE_SIZE));
+  });
+
+  it('serves an OIDC classroom asset only to its owner and never caches it publicly', async () => {
+    mocks.identity = { ownerId: 'user:alice', tenantId: 'default' };
+    mocks.readClassroom.mockResolvedValue({
+      id: CLASSROOM_ID,
+      ownerId: 'user:alice',
+      tenantId: 'default',
+    });
+
+    const response = await get();
+
+    expect(response.status).toBe(200);
+    expect(mocks.readClassroom).toHaveBeenCalledWith(CLASSROOM_ID);
+    expect(response.headers.get('Cache-Control')).toBe('private, no-store');
+  });
+
+  it('hides OIDC classroom assets across owner and tenant boundaries', async () => {
+    mocks.identity = { ownerId: 'user:alice', tenantId: 'default' };
+    mocks.readClassroom.mockResolvedValue({
+      id: CLASSROOM_ID,
+      ownerId: 'user:bob',
+      tenantId: 'default',
+    });
+
+    const response = await get();
+
+    expect(response.status).toBe(404);
+    expect(mocks.createReadStream).not.toHaveBeenCalled();
+
+    mocks.readClassroom.mockResolvedValue({
+      id: CLASSROOM_ID,
+      ownerId: 'user:alice',
+      tenantId: 'other',
+    });
+    const otherTenantResponse = await get();
+    expect(otherTenantResponse.status).toBe(404);
+    expect(mocks.createReadStream).not.toHaveBeenCalled();
   });
 });

@@ -108,6 +108,7 @@ async function generateWithProgress(input: Partial<GenerateClassroomInput> = {})
     { requirement: 'Teach retry basics', ...input },
     {
       baseUrl: 'http://localhost',
+      ownership: { ownerId: 'user:test-user', tenantId: 'default' },
       onProgress: (event) => {
         progress.push({ message: event.message });
       },
@@ -385,6 +386,8 @@ describe('classroom scene generation retries', () => {
     expect(baseUrl).toBe('http://localhost');
     expect(options).toBeUndefined();
     expect(data.id).toBe('stagegen01');
+    expect(data.ownerId).toBe('user:test-user');
+    expect(data.tenantId).toBe('default');
     expect(data.stage.id).toBe('stagegen01');
     for (const scene of data.scenes) {
       expect(scene.stageId).toBe('stagegen01');
@@ -402,7 +405,10 @@ describe('classroom scene generation retries', () => {
     await expect(generateWithProgress()).rejects.toThrow('No scenes were generated');
 
     expect(mocks.reserveClassroom).toHaveBeenCalledTimes(1);
-    expect(mocks.reserveClassroom).toHaveBeenCalledWith('stagegen01', expect.anything());
+    expect(mocks.reserveClassroom).toHaveBeenCalledWith('stagegen01', expect.anything(), {
+      ownerId: 'user:test-user',
+      tenantId: 'default',
+    });
     expect(mocks.persistClassroom).not.toHaveBeenCalled();
     expect(mocks.releaseClassroomReservation).toHaveBeenCalledTimes(1);
     expect(mocks.releaseClassroomReservation).toHaveBeenCalledWith('stagegen01');

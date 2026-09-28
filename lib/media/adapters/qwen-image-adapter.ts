@@ -18,6 +18,7 @@ import type {
 } from '../types';
 import { probeAuth } from '../probe-auth';
 import { requireModel } from '../require-model';
+import { imageProviderFetch } from '../provider-fetch';
 
 const DEFAULT_MODEL = 'qwen-image-max';
 const DEFAULT_BASE_URL = 'https://dashscope.aliyuncs.com';
@@ -65,34 +66,38 @@ export async function generateWithQwenImage(
 ): Promise<ImageGenerationResult> {
   const baseUrl = config.baseUrl || DEFAULT_BASE_URL;
 
-  const response = await fetch(`${baseUrl}/api/v1/services/aigc/multimodal-generation/generation`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${config.apiKey}`,
+  const response = await imageProviderFetch(
+    config,
+    `${baseUrl}/api/v1/services/aigc/multimodal-generation/generation`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${config.apiKey}`,
+      },
+      body: JSON.stringify({
+        model: requireModel(config.model, 'Qwen Image'),
+        input: {
+          messages: [
+            {
+              role: 'user',
+              content: [
+                {
+                  text: options.prompt,
+                },
+              ],
+            },
+          ],
+        },
+        parameters: {
+          negative_prompt: options.negativePrompt || undefined,
+          prompt_extend: true,
+          watermark: false,
+          size: resolveDashScopeSize(options),
+        },
+      }),
     },
-    body: JSON.stringify({
-      model: requireModel(config.model, 'Qwen Image'),
-      input: {
-        messages: [
-          {
-            role: 'user',
-            content: [
-              {
-                text: options.prompt,
-              },
-            ],
-          },
-        ],
-      },
-      parameters: {
-        negative_prompt: options.negativePrompt || undefined,
-        prompt_extend: true,
-        watermark: false,
-        size: resolveDashScopeSize(options),
-      },
-    }),
-  });
+  );
 
   if (!response.ok) {
     const text = await response.text();

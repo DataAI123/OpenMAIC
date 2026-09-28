@@ -11,6 +11,7 @@ import type {
   ImageGenerationResult,
 } from '../types';
 import { requireModel } from '../require-model';
+import { imageProviderFetch } from '../provider-fetch';
 
 const DEFAULT_MODEL = 'gpt-image-2';
 const DEFAULT_BASE_URL = 'https://api.openai.com/v1';
@@ -68,7 +69,7 @@ export async function generateWithOpenAIImage(
   const width = options.width || 1024;
   const height = options.height || 1024;
 
-  const response = await fetch(`${baseUrl}/images/generations`, {
+  const response = await imageProviderFetch(config, `${baseUrl}/images/generations`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',

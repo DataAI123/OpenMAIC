@@ -6,12 +6,18 @@ import {
 } from '@/lib/server/classroom-job-store';
 import { buildRequestOrigin } from '@/lib/server/classroom-storage';
 import { createLogger } from '@/lib/logger';
+import type { RequestOwnerIdentity } from '@/lib/server/agent-runtime/with-owner';
+import { withRequestOwnerId } from '@/lib/server/agent-runtime/with-owner';
 
 const log = createLogger('ClassroomJob API');
 
 export const dynamic = 'force-dynamic';
 
-export async function GET(req: NextRequest, context: { params: Promise<{ jobId: string }> }) {
+async function handleGet(
+  req: NextRequest,
+  context: { params: Promise<{ jobId: string }> },
+  identity: RequestOwnerIdentity,
+) {
   let resolvedJobId: string | undefined;
   try {
     const { jobId } = await context.params;
@@ -21,7 +27,7 @@ export async function GET(req: NextRequest, context: { params: Promise<{ jobId: 
       return apiError('INVALID_REQUEST', 400, 'Invalid classroom generation job id');
     }
 
-    const job = await readClassroomGenerationJob(jobId);
+    const job = await readClassroomGenerationJob(jobId, identity);
     if (!job) {
       return apiError('INVALID_REQUEST', 404, 'Classroom generation job not found');
     }
@@ -51,4 +57,12 @@ export async function GET(req: NextRequest, context: { params: Promise<{ jobId: 
       error instanceof Error ? error.message : String(error),
     );
   }
+}
+
+export async function GET(req: NextRequest, context: { params: Promise<{ jobId: string }> }) {
+  return withRequestOwnerId(req, async (ownerId, responseHeaders, identity) => {
+    const response = await handleGet(req, context, identity ?? { ownerId });
+    responseHeaders.forEach((value, name) => response.headers.append(name, value));
+    return response;
+  });
 }

@@ -1,4 +1,9 @@
 {
+  "auth": {
+    "denied": "Sign-in was cancelled or not authorized.",
+    "failed": "Sign-in could not be completed. Please try again.",
+    "unavailable": "Authentication is temporarily unavailable. Please try again later."
+  },
   "common": {
     "you": "You",
     "confirm": "Confirm",
@@ -1831,6 +1836,7 @@
       "type": "Type",
       "reqs": "Reqs",
       "usage": "Usage",
+      "estimatedQuotaTokens": "estimated quota tokens",
       "empty": "No usage data yet",
       "kindLlm": "LLM",
       "kindImage": "Image",

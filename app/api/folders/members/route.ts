@@ -18,11 +18,11 @@
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
 
-import type { DocumentFolderStore } from '@openmaic/storage';
+import { DocumentNotFoundError, type DocumentFolderStore } from '@openmaic/storage';
 
 import { isAgentRuntimeConfigured } from '@/lib/config/feature-flags';
 import { getOwnerScopedDocumentStore } from '@/lib/server/agent-runtime/owner-scoped-documents';
-import { ownerJson } from '@/lib/server/agent-runtime/route-response';
+import { ownerJson, ownerNotFound } from '@/lib/server/agent-runtime/route-response';
 import { withRequestOwnerId } from '@/lib/server/agent-runtime/with-owner';
 
 export const runtime = 'nodejs';
@@ -49,15 +49,25 @@ export async function POST(req: NextRequest) {
     return jsonError(400, 'INVALID_FOLDER_ID', 'folderId must be a non-empty string or null');
   }
 
-  return withRequestOwnerId(req, async (ownerId, responseHeaders) => {
+  return withRequestOwnerId(req, async (ownerId, responseHeaders, identity) => {
     try {
-      const store = (await getOwnerScopedDocumentStore(ownerId)) as unknown as DocumentFolderStore;
+      const store = (await getOwnerScopedDocumentStore(
+        ownerId,
+        undefined,
+        identity?.tenantId,
+      )) as unknown as DocumentFolderStore;
       const ok = await store.setStageFolder(stageId, folderId);
       if (!ok) {
         return jsonError(404, 'FOLDER_NOT_FOUND', 'folder not found', responseHeaders);
       }
       return ownerJson({ ok: true }, 200, responseHeaders);
     } catch (error) {
+      // Access refusal is the codebase's no-existence-oracle contract: a plain
+      // 404, identical whether the store reported a foreign stage (StageAccessError,
+      // a DocumentNotFoundError subclass) or a since-deleted soft-referenced one.
+      // Probing cannot distinguish foreign from absent, and a client error never
+      // becomes a logged 500. Genuine failures still fall through to 500 below.
+      if (error instanceof DocumentNotFoundError) return ownerNotFound(responseHeaders);
       console.error(
         `[Folders] Failed to set membership [owner=${ownerId}, stage=${stageId}]:`,
         error,

@@ -1,4 +1,9 @@
 {
+  "auth": {
+    "denied": "Die Anmeldung wurde abgebrochen oder nicht autorisiert.",
+    "failed": "Die Anmeldung konnte nicht abgeschlossen werden. Bitte erneut versuchen.",
+    "unavailable": "Die Authentifizierung ist vorübergehend nicht verfügbar. Bitte später erneut versuchen."
+  },
   "common": {
     "you": "Du",
     "confirm": "Bestätigen",

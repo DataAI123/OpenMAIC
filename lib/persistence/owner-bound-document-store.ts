@@ -16,6 +16,7 @@ import type {
 } from '@openmaic/storage';
 
 import { claimStageMeta, StageAccessError, tombstoneStageMeta } from './stage-meta';
+import { isOwnerReadEnforcementEnabled } from './owner-read-policy';
 
 export interface PoolClientLike {
   query(text: string, params?: unknown[]): Promise<{ rows: unknown[] }>;
@@ -29,6 +30,20 @@ export interface TransactionSource {
 export interface OwnerBoundDocumentStoreOptions {
   pool: TransactionSource;
   ownerId: string;
+  /**
+   * The tenant the caller is acting in, resolved server-side from the
+   * application session (`auth_sessions.active_tenant_id`) — never from request
+   * input. Absent in legacy anonymous mode, which has no tenant dimension.
+   *
+   * When present, a stage row in another tenant is refused exactly like a
+   * foreign-owner row: the same `StageAccessError('foreign')`, and therefore
+   * the same 404 on the read path. The one exception is a published
+   * (`is_public AND deleted_at IS NULL`) course, which stays cross-tenant
+   * readable while all writes remain tenant-locked.
+   */
+  tenantId?: string;
+  /** Enforce owner-or-public access for document reads. */
+  enforceOwnerReads?: boolean;
   validateScene: SceneValidator;
   validateStage: StageValidator;
   /** Runner-only lease fence, evaluated inside every mutation transaction. */
@@ -43,7 +58,10 @@ interface PendingOperation {
 
 interface RawOwnershipRow extends Record<string, unknown> {
   owner_id: string;
+  is_public: boolean;
   deleted_at: Date | string | null;
+  /** Selected only when the store is tenant-scoped. */
+  tenant_id?: string;
 }
 
 function queryableFor(connection: Pick<PoolClientLike, 'query'>): Queryable {
@@ -64,6 +82,8 @@ class OwnerBoundDocumentStore<TScene extends SceneLike, TStage extends Stage>
     private readonly runTransaction: WithTransaction,
     private readonly queryable: Queryable,
     private readonly ownerId: string,
+    /** Tenant scope, absent in legacy mode. See `OwnerBoundDocumentStoreOptions.tenantId`. */
+    private readonly tenantId: string | undefined,
     /** The same store, pinned to one already-open transaction. See its use. */
     private readonly pinnedToTransaction: (queryable: Queryable) => PgDocumentStore<TScene, TStage>,
   ) {}
@@ -189,9 +209,16 @@ class OwnerBoundDocumentStore<TScene extends SceneLike, TStage extends Stage>
   async listDocuments(folderId?: string): Promise<DocumentSummary[]> {
     const [documents, live] = await Promise.all([
       this.inner.listDocuments(folderId),
+      // The live set is the same `stage_meta` authority the mutation gate
+      // reads. A tenant-scoped store additionally requires the row to be in
+      // its own tenant, so a same-owner document created in another tenant is
+      // never listed even though `document_stages.owner_id` matches.
       this.queryable.query<{ stage_id: string } & Record<string, unknown>>(
-        'SELECT stage_id FROM stage_meta WHERE owner_id = $1 AND deleted_at IS NULL',
-        [this.ownerId],
+        this.tenantId === undefined
+          ? 'SELECT stage_id FROM stage_meta WHERE owner_id = $1 AND deleted_at IS NULL'
+          : `SELECT stage_id FROM stage_meta
+              WHERE owner_id = $1 AND tenant_id = $2 AND deleted_at IS NULL`,
+        this.tenantId === undefined ? [this.ownerId] : [this.ownerId, this.tenantId],
       ),
     ]);
     const liveIds = new Set(live.rows.map((row) => row.stage_id));
@@ -246,13 +273,31 @@ export function createOwnerBoundDocumentStore<
         if (operation && operation.mode !== 'read') await options.mutationFence?.(queryable);
         if (operation?.stageId) {
           const lock = operation.mode === 'read' ? 'FOR SHARE' : 'FOR UPDATE';
+          const tenantScoped = options.tenantId !== undefined;
           const result = await queryable.query<RawOwnershipRow>(
-            `SELECT owner_id, deleted_at FROM stage_meta WHERE stage_id = $1 ${lock}`,
+            `SELECT owner_id, is_public, deleted_at${
+              tenantScoped ? ', tenant_id' : ''
+            } FROM stage_meta WHERE stage_id = $1 ${lock}`,
             [operation.stageId],
           );
           const row = result.rows[0];
           if (row) {
-            if (operation.mode !== 'read' && row.owner_id !== options.ownerId) {
+            const ownerForeign =
+              row.owner_id !== options.ownerId &&
+              (operation.mode !== 'read' ||
+                ((options.enforceOwnerReads ?? isOwnerReadEnforcementEnabled()) &&
+                  row.is_public !== true));
+            // A published course stays cross-tenant readable (the documented
+            // cross-tenant read rule); every other mismatch — including any
+            // write — is a foreign row. This is the write lock: a document
+            // created in one tenant can never be read or written back in
+            // another, which is the leak a shared `owner_id` would otherwise
+            // open for a user who belongs to several tenants.
+            const tenantForeign =
+              tenantScoped &&
+              row.tenant_id !== options.tenantId &&
+              !(operation.mode === 'read' && row.is_public === true);
+            if (ownerForeign || tenantForeign) {
               throw new StageAccessError(operation.stageId, options.ownerId, 'foreign');
             }
             if (row.deleted_at !== null && operation.mode !== 'delete') {
@@ -273,7 +318,7 @@ export function createOwnerBoundDocumentStore<
 
         const result = await body(queryable);
         if (operation?.mode === 'create') {
-          await claimStageMeta(queryable, operation.stageId!, options.ownerId);
+          await claimStageMeta(queryable, operation.stageId!, options.ownerId, options.tenantId);
         }
         if (operation && operation.mode !== 'read') await options.mutationFence?.(queryable);
         await client.query('COMMIT');
@@ -330,6 +375,7 @@ export function createOwnerBoundDocumentStore<
     withTransaction,
     queryable,
     options.ownerId,
+    options.tenantId,
     pinnedToTransaction,
   );
 }

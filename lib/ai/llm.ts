@@ -11,7 +11,7 @@ import { PROVIDERS } from './providers';
 import { thinkingContext } from './thinking-context';
 import { getModelMetadataKey } from './model-metadata';
 import { getCanonicalModelId } from './model-aliases';
-import type { ThinkingCapability, ThinkingConfig } from '@/lib/types/provider';
+import type { ProviderId, ThinkingCapability, ThinkingConfig } from '@/lib/types/provider';
 import {
   getThinkingMode,
   pickThinkingBudget,
@@ -295,6 +295,7 @@ function buildUsageMeta(params: GenerateTextParams | StreamTextParams, source: s
 function recordUsageSafe(
   rawUsage: unknown,
   meta: { source: string; providerId: string; modelId: string; modelString: string },
+  quotaEstimatedTokens?: number,
 ): void {
   void (async () => {
     try {
@@ -307,11 +308,199 @@ function recordUsageSafe(
         modelId: meta.modelId,
         modelString: meta.modelString,
         usage: normalizeUsage(rawUsage as never),
+        ...(quotaEstimatedTokens != null ? { quotaEstimatedTokens } : {}),
       });
     } catch (err) {
       log.warn('Usage capture failed (ignored):', err);
     }
   })();
+}
+
+interface PersonalQuotaHooks {
+  abortSignal: AbortSignal;
+  prepareStep: (event: unknown) => Promise<unknown>;
+  onStepFinish: (event: unknown) => Promise<void>;
+  finish: () => Promise<void>;
+  fail: () => Promise<void>;
+}
+
+function getStepContextWindow(model: unknown): number {
+  if (!model || typeof model !== 'object') {
+    throw new Error('PERSONAL_LLM_QUOTA_MODEL_CONTEXT_UNKNOWN');
+  }
+  const info = model as { provider?: unknown; modelId?: unknown };
+  const rawProvider = typeof info.provider === 'string' ? info.provider : undefined;
+  const modelId = typeof info.modelId === 'string' ? info.modelId : undefined;
+  const providerId = normalizeProviderId(rawProvider, modelId);
+  if (!providerId || !modelId) throw new Error('PERSONAL_LLM_QUOTA_MODEL_CONTEXT_UNKNOWN');
+  const canonicalId = getCanonicalModelId(providerId, modelId);
+  const modelInfo = PROVIDERS[providerId as ProviderId]?.models.find(
+    (candidate) => candidate.id === canonicalId || candidate.id === modelId,
+  );
+  const contextWindow = modelInfo?.contextWindow;
+  if (!Number.isSafeInteger(contextWindow) || !contextWindow || contextWindow <= 0) {
+    throw new Error('PERSONAL_LLM_QUOTA_MODEL_CONTEXT_UNKNOWN');
+  }
+  return contextWindow;
+}
+
+function isPersonalQuotaError(error: unknown): boolean {
+  const pending: unknown[] = [error];
+  const seen = new Set<unknown>();
+  while (pending.length) {
+    const current = pending.pop();
+    if (!current || seen.has(current)) continue;
+    if (typeof current !== 'object' && typeof current !== 'string') continue;
+    seen.add(current);
+    if (typeof current === 'string') {
+      if (current.includes('PERSONAL_LLM_QUOTA_') || current.includes('PERSONAL_LLM_MONTHLY_')) {
+        return true;
+      }
+      continue;
+    }
+
+    const details = current as {
+      message?: unknown;
+      code?: unknown;
+      cause?: unknown;
+      errors?: unknown;
+    };
+    if (
+      details.code === 'PERSONAL_LLM_MONTHLY_QUOTA_EXCEEDED' ||
+      (typeof details.message === 'string' &&
+        (details.message.includes('PERSONAL_LLM_QUOTA_') ||
+          details.message.includes('PERSONAL_LLM_MONTHLY_')))
+    ) {
+      return true;
+    }
+    pending.push(details.cause);
+    if (Array.isArray(details.errors)) pending.push(...details.errors);
+  }
+  return false;
+}
+
+/**
+ * Reserve the model's full context window before each provider step. This is a
+ * provider-independent upper bound for that step; excess is released when the
+ * actual usage arrives. A new reservation is acquired by prepareStep before a
+ * tool loop can call the model again.
+ */
+async function createPersonalQuotaHooks(
+  params: GenerateTextParams | StreamTextParams,
+  meta: { source: string; providerId: string; modelId: string; modelString: string },
+  leaseAbort = new AbortController(),
+): Promise<PersonalQuotaHooks | undefined> {
+  if (process.env.OPENMAIC_AUTH_MODE?.trim() !== 'oidc') return undefined;
+  const { currentUsageAttribution } = await import('@/lib/server/usage-attribution');
+  const ownerId = currentUsageAttribution()?.ownerId;
+  if (!ownerId?.startsWith('user:')) {
+    throw new Error('PERSONAL_LLM_QUOTA_REQUIRES_AUTHENTICATED_USER');
+  }
+  const { renewPersonalLlmTokenReservation, reservePersonalLlmTokens, settlePersonalLlmTokens } =
+    await import('@/lib/server/personal-llm-quota');
+
+  const record = params as Record<string, unknown>;
+  const callerPrepareStep = record.prepareStep as ((event: unknown) => unknown) | undefined;
+  const callerOnStepFinish = record.onStepFinish as ((event: unknown) => unknown) | undefined;
+  const callerAbortSignal = record.abortSignal as AbortSignal | undefined;
+  const abortSignal = callerAbortSignal
+    ? AbortSignal.any([callerAbortSignal, leaseAbort.signal])
+    : leaseAbort.signal;
+  let active: Awaited<ReturnType<typeof reservePersonalLlmTokens>> | undefined;
+  let heartbeatTimer: ReturnType<typeof setInterval> | undefined;
+  let heartbeatRunning = false;
+
+  const stopHeartbeat = () => {
+    if (heartbeatTimer) clearInterval(heartbeatTimer);
+    heartbeatTimer = undefined;
+  };
+  const startHeartbeat = (reservationId: string) => {
+    stopHeartbeat();
+    heartbeatTimer = setInterval(() => {
+      if (heartbeatRunning || active?.id !== reservationId) return;
+      heartbeatRunning = true;
+      void renewPersonalLlmTokenReservation(reservationId)
+        .catch((error: unknown) => {
+          leaseAbort.abort(
+            error instanceof Error
+              ? new Error('PERSONAL_LLM_QUOTA_RESERVATION_LEASE_LOST', { cause: error })
+              : new Error('PERSONAL_LLM_QUOTA_RESERVATION_LEASE_LOST'),
+          );
+        })
+        .finally(() => {
+          heartbeatRunning = false;
+        });
+    }, 60_000);
+    heartbeatTimer.unref?.();
+  };
+
+  const settle = async (actualTokens?: number) => {
+    if (!active) return undefined;
+    const reservation = active;
+    // If a provider omits usage on a completed step, charge the reservation's
+    // full upper bound rather than letting an unmeasured call be free.
+    const estimated = actualTokens === undefined;
+    const chargedTokens = actualTokens ?? reservation.reservedTokens;
+    await settlePersonalLlmTokens(reservation.id, chargedTokens);
+    active = undefined;
+    stopHeartbeat();
+    return { chargedTokens, estimated };
+  };
+
+  return {
+    abortSignal,
+    prepareStep: async (event) => {
+      const prepared = callerPrepareStep ? await callerPrepareStep(event) : undefined;
+      if (active) throw new Error('PERSONAL_LLM_QUOTA_STEP_RESERVATION_NOT_SETTLED');
+      const stepModel =
+        prepared && typeof prepared === 'object' && 'model' in prepared
+          ? (prepared as { model?: unknown }).model
+          : (event as { model?: unknown } | null)?.model;
+      active = await reservePersonalLlmTokens(
+        ownerId,
+        getStepContextWindow(stepModel ?? params.model),
+      );
+      startHeartbeat(active.id);
+      return prepared;
+    },
+    onStepFinish: async (event) => {
+      const usage = (event as { usage?: unknown } | null)?.usage;
+      const { hasBillableTokens, normalizeUsage } = await import('@/lib/usage/normalize');
+      const normalized = normalizeUsage(usage as never);
+      const inputTokens = Number.isFinite(normalized.inputTokens) ? normalized.inputTokens : 0;
+      const cacheTokens =
+        (Number.isFinite(normalized.cacheReadTokens) ? normalized.cacheReadTokens : 0) +
+        (Number.isFinite(normalized.cacheCreationTokens) ? normalized.cacheCreationTokens : 0);
+      const outputTokens = Number.isFinite(normalized.outputTokens) ? normalized.outputTokens : 0;
+      const actualTokens = Math.max(inputTokens, cacheTokens) + outputTokens;
+      const hasMeasuredUsage = hasBillableTokens(normalized);
+      const settlement = await settle(
+        hasMeasuredUsage && Number.isSafeInteger(actualTokens) && actualTokens >= 0
+          ? actualTokens
+          : undefined,
+      );
+      recordUsageSafe(usage, meta, settlement?.estimated ? settlement.chargedTokens : undefined);
+      if (callerOnStepFinish) await callerOnStepFinish(event);
+    },
+    finish: async () => {
+      try {
+        const settlement = await settle();
+        if (settlement?.estimated) recordUsageSafe(undefined, meta, settlement.chargedTokens);
+      } catch (error) {
+        stopHeartbeat();
+        throw error;
+      }
+    },
+    fail: async () => {
+      try {
+        const settlement = await settle();
+        if (settlement?.estimated) recordUsageSafe(undefined, meta, settlement.chargedTokens);
+      } catch (error) {
+        stopHeartbeat();
+        throw error;
+      }
+    },
+  };
 }
 
 /**
@@ -337,17 +526,30 @@ export async function callLLM<T extends GenerateTextParams>(
   let lastError: unknown;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    let quotaHooks: PersonalQuotaHooks | undefined;
     try {
       // Resolve effective thinking config: per-call > global env > undefined
       const effectiveThinking = thinking ?? getGlobalThinkingConfig();
       const injectedParams = injectProviderOptions(params, effectiveThinking);
+      const usageMeta = buildUsageMeta(params, source);
+      quotaHooks = await createPersonalQuotaHooks(params, usageMeta);
+      const hookedParams = quotaHooks
+        ? ({
+            ...injectedParams,
+            // The SDK's internal retries are invisible to our quota boundary.
+            // callLLM's explicit retry loop can retry, with a fresh reservation.
+            maxRetries: 0,
+            abortSignal: quotaHooks.abortSignal,
+            prepareStep: quotaHooks.prepareStep,
+            onStepFinish: quotaHooks.onStepFinish,
+          } as T)
+        : injectedParams;
 
       // Wrap in thinkingContext so the custom fetch wrapper in providers.ts
       // can read the config and inject vendor-specific body params for
       // OpenAI-compatible providers.
-      const result = await thinkingContext.run(effectiveThinking, () =>
-        generateText(injectedParams),
-      );
+      const result = await thinkingContext.run(effectiveThinking, () => generateText(hookedParams));
+      await quotaHooks?.finish();
 
       // Record before validating: every attempt that got this far was billed,
       // including one that fails validation below and one that is handed back
@@ -358,7 +560,7 @@ export async function callLLM<T extends GenerateTextParams>(
       // every earlier step would go unaccounted. `totalUsage` aggregates across
       // steps and equals `usage` for a single-step call. Mirrors streamLLM,
       // which already prefers the aggregate.
-      recordUsageSafe(result.totalUsage ?? result.usage, buildUsageMeta(params, source));
+      if (!quotaHooks) recordUsageSafe(result.totalUsage ?? result.usage, usageMeta);
 
       // Validate result (only when retries are configured)
       if (validate && !validate(result.text)) {
@@ -371,12 +573,14 @@ export async function callLLM<T extends GenerateTextParams>(
 
       return result;
     } catch (error) {
+      await quotaHooks?.fail();
       lastError = error;
 
-      if (attempt < maxAttempts) {
+      if (attempt < maxAttempts && !isPersonalQuotaError(error)) {
         log.warn(`[${source}] Call failed (attempt ${attempt}/${maxAttempts}), retrying...`, error);
         continue;
       }
+      break;
     }
   }
 
@@ -406,13 +610,48 @@ export function streamLLM<T extends StreamTextParams>(
   // Wrap onFinish to capture usage when the stream completes, preserving any
   // caller-supplied onFinish. totalUsage aggregates across steps.
   const usageMeta = buildUsageMeta(params, source);
+  const quotaEnabled = process.env.OPENMAIC_AUTH_MODE?.trim() === 'oidc';
+  const quotaAbortController = new AbortController();
+  const callerAbortSignal = (params as Record<string, unknown>).abortSignal as
+    | AbortSignal
+    | undefined;
+  const quotaAbortSignal = callerAbortSignal
+    ? AbortSignal.any([callerAbortSignal, quotaAbortController.signal])
+    : quotaAbortController.signal;
+  const quotaHooksPromise = quotaEnabled
+    ? createPersonalQuotaHooks(params, usageMeta, quotaAbortController)
+    : Promise.resolve(undefined);
   const callerOnFinish = (params as Record<string, unknown>).onFinish as
     | ((event: { totalUsage?: unknown; usage?: unknown }) => void | Promise<void>)
     | undefined;
+  const callerOnError = (params as Record<string, unknown>).onError as
+    | ((event: unknown) => void | Promise<void>)
+    | undefined;
+  const callerOnAbort = (params as Record<string, unknown>).onAbort as
+    | ((event: unknown) => void | Promise<void>)
+    | undefined;
   const wrappedParams = {
     ...params,
+    ...(quotaEnabled ? { maxRetries: 0 } : {}),
+    ...(quotaEnabled
+      ? {
+          abortSignal: quotaAbortSignal,
+          prepareStep: async (event: unknown) => (await quotaHooksPromise)?.prepareStep(event),
+          onStepFinish: async (event: unknown) => (await quotaHooksPromise)?.onStepFinish(event),
+          onError: async (event: unknown) => {
+            await (await quotaHooksPromise)?.fail();
+            if (callerOnError) await callerOnError(event);
+          },
+          onAbort: async (event: unknown) => {
+            await (await quotaHooksPromise)?.fail();
+            if (callerOnAbort) await callerOnAbort(event);
+          },
+        }
+      : {}),
     onFinish: async (event: { totalUsage?: unknown; usage?: unknown }) => {
-      recordUsageSafe(event.totalUsage ?? event.usage, usageMeta);
+      const hooks = quotaEnabled ? await quotaHooksPromise : undefined;
+      await hooks?.finish();
+      if (!hooks) recordUsageSafe(event.totalUsage ?? event.usage, usageMeta);
       if (callerOnFinish) await callerOnFinish(event);
     },
   } as T;

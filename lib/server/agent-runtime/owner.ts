@@ -54,11 +54,10 @@ function anonymousCookieHeader(id: string): string {
  * — the headers the caller returns to the client — is required: it receives
  * the outgoing Set-Cookie header whenever a new cookie is issued.
  *
- * Current callers (the agent event-stream routes) pass no authenticated
- * owner: for them this slice resolves only the anonymous cookie identity. A
- * future auth integration must thread `authenticatedOwnerId` through those
- * call sites, or sessions created under authenticated identities would be
- * unreachable by their own owner.
+ * This synchronous helper remains the legacy anonymous-cookie primitive.
+ * HTTP entry points use `resolveRequestOwnerIdForRequest` from `with-owner.ts`
+ * so OIDC mode verifies the database-backed application session and never
+ * falls back to an anonymous identity.
  */
 export function resolveRequestOwnerId(
   req: Pick<Request, 'headers'>,

@@ -1,4 +1,9 @@
 {
+  "auth": {
+    "denied": "登录已取消或未通过授权。",
+    "failed": "登录未能完成，请重试。",
+    "unavailable": "身份认证服务暂时不可用，请稍后重试。"
+  },
   "common": {
     "you": "你",
     "confirm": "确定",
@@ -1831,6 +1836,7 @@
       "type": "类型",
       "reqs": "请求",
       "usage": "用量",
+      "estimatedQuotaTokens": "估算配额 Token",
       "empty": "暂无用量数据",
       "kindLlm": "语言模型",
       "kindImage": "图像",

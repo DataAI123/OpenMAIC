@@ -100,18 +100,38 @@ export class StageAccessError extends DocumentNotFoundError {
   }
 }
 
+/**
+ * Claim a stage id for its owner, recording the tenant it was created in.
+ *
+ * `tenantId` is supplied by the OIDC request boundary (never by request input).
+ * When it is present the row is stamped with it, so the id can never be read or
+ * written back under a different tenant — the `stage_meta` gate in
+ * `owner-bound-document-store.ts` compares the same column. When it is absent
+ * (legacy anonymous mode, which has no tenant context) the row takes the
+ * schema's `default` sentinel, preserving the single-deployment behavior.
+ */
 export async function claimStageMeta(
   queryable: Queryable,
   stageId: string,
   ownerId: string,
+  tenantId?: string,
 ): Promise<void> {
-  const inserted = await queryable.query<{ owner_id: string } & Record<string, unknown>>(
-    `INSERT INTO stage_meta (stage_id, owner_id)
-     VALUES ($1, $2)
-     ON CONFLICT (stage_id) DO NOTHING
-     RETURNING owner_id`,
-    [stageId, ownerId],
-  );
+  const inserted =
+    tenantId === undefined
+      ? await queryable.query<{ owner_id: string } & Record<string, unknown>>(
+          `INSERT INTO stage_meta (stage_id, owner_id)
+           VALUES ($1, $2)
+           ON CONFLICT (stage_id) DO NOTHING
+           RETURNING owner_id`,
+          [stageId, ownerId],
+        )
+      : await queryable.query<{ owner_id: string } & Record<string, unknown>>(
+          `INSERT INTO stage_meta (stage_id, owner_id, tenant_id)
+           VALUES ($1, $2, $3)
+           ON CONFLICT (stage_id) DO NOTHING
+           RETURNING owner_id`,
+          [stageId, ownerId, tenantId],
+        );
   if (inserted.rows[0]?.owner_id === ownerId) return;
 
   const existing = await queryable.query<{ owner_id: string } & Record<string, unknown>>(

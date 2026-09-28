@@ -28,11 +28,15 @@ type Params = { params: Promise<{ id: string }> };
 export async function GET(req: NextRequest, { params }: Params) {
   if (!isAgentRuntimeConfigured()) return new Response('Not found', { status: 404 });
 
-  return withRequestOwnerId(req, async (ownerId, responseHeaders) => {
-    const { id } = await params;
-    const store = await getOwnerScopedDocumentStore(ownerId);
-    const manifest = await store.readFreshnessManifest(id);
-    if (!manifest) return ownerNotFound(responseHeaders);
-    return ownerJson(manifest, 200, responseHeaders);
-  });
+  return withRequestOwnerId(
+    req,
+    async (ownerId, responseHeaders, identity) => {
+      const { id } = await params;
+      const store = await getOwnerScopedDocumentStore(ownerId, undefined, identity?.tenantId);
+      const manifest = await store.readFreshnessManifest(id);
+      if (!manifest) return ownerNotFound(responseHeaders);
+      return ownerJson(manifest, 200, responseHeaders);
+    },
+    { allowAnonymousPublicRead: () => true },
+  );
 }

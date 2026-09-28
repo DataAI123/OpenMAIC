@@ -45,6 +45,25 @@ function getNoProxyEntries(): string[] {
     .filter(Boolean);
 }
 
+/**
+ * Redact credentials from a proxy URL for logging. A proxy env value can carry
+ * `user:pass@host` basic-auth userinfo, which must never reach server logs.
+ * An unparseable value is replaced wholesale — the raw string could itself be
+ * the secret — so nothing sensitive is ever echoed back.
+ * Exported for tests.
+ */
+export function redactProxyForLog(raw: string | undefined): string {
+  if (!raw) return 'none';
+  try {
+    const url = new URL(raw);
+    if (url.username) url.username = '';
+    if (url.password) url.password = '';
+    return url.toString();
+  } catch {
+    return '[redacted proxy URL]';
+  }
+}
+
 function isLoopbackHost(hostname: string): boolean {
   const host = hostname.toLowerCase();
   if (host === 'localhost' || host.endsWith('.localhost')) return true;
@@ -131,7 +150,7 @@ export async function proxyFetch(input: string | URL, init?: RequestInit): Promi
     return fetch(input, init);
   }
 
-  log.info('Using proxy', cachedProxyUrl, 'for:', url.slice(0, 80));
+  log.info('Using proxy', redactProxyForLog(cachedProxyUrl), 'for:', url.slice(0, 80));
   // Use undici's fetch with the proxy dispatcher
   const res = await undiciFetch(input, {
     ...(init as UndiciRequestInit),

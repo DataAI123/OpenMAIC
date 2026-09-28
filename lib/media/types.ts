@@ -138,6 +138,14 @@ export interface ImageGenerationConfig {
   baseUrl?: string;
   /** Optional model ID override (uses provider default if omitted) */
   model?: string;
+  /**
+   * Route already validated this `baseUrl` as client-supplied BYOK input, so
+   * connect-time DNS pinning + per-hop redirect revalidation must guard it
+   * against the rebinding/302-to-internal window. Server-managed base URLs
+   * leave this unset (trusted operator config, route never validated them, and
+   * local self-hosted providers stay reachable without ALLOW_LOCAL_NETWORKS).
+   */
+  pinSsrfConnections?: boolean;
 }
 
 /**
@@ -251,6 +259,14 @@ export interface VideoGenerationConfig {
   baseUrl?: string;
   /** Optional model ID override (uses provider default if omitted) */
   model?: string;
+  /**
+   * Route already validated this `baseUrl` as client-supplied BYOK input, so
+   * connect-time DNS pinning + per-hop redirect revalidation must guard the
+   * provider request (see {@link file://./provider-fetch}). Server-managed base
+   * URLs leave this unset (trusted operator config), so local self-hosted
+   * providers stay reachable without ALLOW_LOCAL_NETWORKS.
+   */
+  pinSsrfConnections?: boolean;
 }
 
 /**

@@ -6,6 +6,18 @@ const mocks = vi.hoisted(() => ({
   buildRequestOrigin: vi.fn(),
   createClassroomGenerationJob: vi.fn(),
   runClassroomGenerationJob: vi.fn(),
+  withRequestOwnerId: vi.fn(),
+  consumeActionRateLimit: vi.fn(async () => undefined),
+  UserApiRateLimitExceededError: class extends Error {
+    constructor(readonly retryAfterSeconds: number) {
+      super('User API rate limit exceeded');
+    }
+  },
+}));
+
+vi.mock('@/lib/server/user-api-rate-limit', () => ({
+  consumeActionRateLimit: mocks.consumeActionRateLimit,
+  UserApiRateLimitExceededError: mocks.UserApiRateLimitExceededError,
 }));
 
 vi.mock('next/server', async (importOriginal) => {
@@ -23,6 +35,10 @@ vi.mock('@/lib/server/classroom-job-runner', () => ({
 
 vi.mock('@/lib/server/classroom-storage', () => ({
   buildRequestOrigin: mocks.buildRequestOrigin,
+}));
+
+vi.mock('@/lib/server/agent-runtime/with-owner', () => ({
+  withRequestOwnerId: mocks.withRequestOwnerId,
 }));
 
 vi.mock('@/lib/logger', () => ({
@@ -51,6 +67,8 @@ describe('POST /api/generate-classroom', () => {
     mocks.buildRequestOrigin.mockReset();
     mocks.createClassroomGenerationJob.mockReset();
     mocks.runClassroomGenerationJob.mockReset();
+    mocks.withRequestOwnerId.mockReset();
+    mocks.consumeActionRateLimit.mockReset().mockResolvedValue(undefined);
 
     mocks.buildRequestOrigin.mockReturnValue('http://localhost');
     mocks.createClassroomGenerationJob.mockResolvedValue({
@@ -58,6 +76,9 @@ describe('POST /api/generate-classroom', () => {
       step: 'queued',
       message: 'Classroom generation job queued',
     });
+    mocks.withRequestOwnerId.mockImplementation(async (_req, handler) =>
+      handler('user:alice', new Headers(), { ownerId: 'user:alice', tenantId: 'default' }),
+    );
   });
 
   it('returns 400 when pdfContent is a string instead of the documented object', async () => {
@@ -74,6 +95,29 @@ describe('POST /api/generate-classroom', () => {
     });
     expect(mocks.createClassroomGenerationJob).not.toHaveBeenCalled();
     expect(mocks.after).not.toHaveBeenCalled();
+  });
+
+  it('answers 429 with Retry-After when the per-user window is exhausted, before touching the job store', async () => {
+    mocks.consumeActionRateLimit.mockRejectedValueOnce(new mocks.UserApiRateLimitExceededError(37));
+
+    const res = await postGenerateClassroom({ requirement: 'Generate a class' });
+
+    expect(res.status).toBe(429);
+    expect(res.headers.get('Retry-After')).toBe('37');
+    await expect(res.json()).resolves.toMatchObject({ errorCode: 'RATE_LIMITED' });
+    expect(mocks.consumeActionRateLimit).toHaveBeenCalledWith('user:alice', 'generate_classroom');
+    expect(mocks.createClassroomGenerationJob).not.toHaveBeenCalled();
+  });
+
+  it('fails closed with 503 when the rate-limit store is unavailable', async () => {
+    mocks.consumeActionRateLimit.mockRejectedValueOnce(
+      new Error('USER_API_RATE_LIMIT_DATABASE_UNAVAILABLE'),
+    );
+
+    const res = await postGenerateClassroom({ requirement: 'Generate a class' });
+
+    expect(res.status).toBe(503);
+    expect(mocks.createClassroomGenerationJob).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -118,7 +162,15 @@ describe('POST /api/generate-classroom', () => {
         requirement: 'Generate from this PDF',
         pdfContent,
       }),
+      { ownerId: 'user:alice', tenantId: 'default' },
     );
     expect(mocks.after).toHaveBeenCalledTimes(1);
+    await mocks.after.mock.calls[0][0]();
+    expect(mocks.runClassroomGenerationJob).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ requirement: 'Generate from this PDF' }),
+      'http://localhost',
+      { ownerId: 'user:alice', tenantId: 'default' },
+    );
   });
 });

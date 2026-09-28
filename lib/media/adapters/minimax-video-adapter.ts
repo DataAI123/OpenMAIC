@@ -18,6 +18,7 @@ import type {
 import { probeAuth } from '../probe-auth';
 import { runPolledTask } from '../polled-task';
 import { requireModel } from '../require-model';
+import { videoProviderFetch } from '../provider-fetch';
 
 const BASE_URL = 'https://api.minimaxi.com';
 const POLL_INTERVAL_MS = 5000;
@@ -101,7 +102,7 @@ async function submitTask(
   if (usesV2TaskApi(model)) {
     // H3 renders 768P clips; request the fixed 6s tier so the reported
     // duration below matches the delivered video.
-    const response = await fetch(`${baseUrl}/v2/video_generation`, {
+    const response = await videoProviderFetch(config, `${baseUrl}/v2/video_generation`, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${config.apiKey}`,
@@ -129,7 +130,7 @@ async function submitTask(
     return taskId;
   }
 
-  const response = await fetch(`${baseUrl}/v1/video_generation`, {
+  const response = await videoProviderFetch(config, `${baseUrl}/v1/video_generation`, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${config.apiKey}`,
@@ -173,7 +174,7 @@ async function pollTaskStatus(
     ? `${baseUrl}/v2/query/video_generation/${encodeURIComponent(taskId)}`
     : `${baseUrl}/v1/query/video_generation?task_id=${encodeURIComponent(taskId)}`;
 
-  const response = await fetch(url, {
+  const response = await videoProviderFetch(config, url, {
     method: 'GET',
     headers: {
       Authorization: `Bearer ${config.apiKey}`,
@@ -195,7 +196,7 @@ async function retrieveFileDownloadUrl(
   const baseUrl = (config.baseUrl || BASE_URL).replace(/\/$/, '');
   const url = `${baseUrl}/v1/files/retrieve?file_id=${encodeURIComponent(fileId)}`;
 
-  const response = await fetch(url, {
+  const response = await videoProviderFetch(config, url, {
     method: 'GET',
     headers: {
       Authorization: `Bearer ${config.apiKey}`,

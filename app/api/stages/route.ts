@@ -2,11 +2,11 @@
  * /api/stages — the workbench's course-document index and create face.
  *
  * Every handler is owner-scoped exactly like the agent tools: the owner
- * resolves from the anonymous cookie (`withRequestOwnerId`) and is never a
- * request parameter, and all reads and writes go through the owner-bound
- * document store (`getOwnerScopedDocumentStore`), the same seam the runner
- * binds for the stage tools. A stage created here is visible to this browser
- * and to nobody else.
+ * resolves from the verified OIDC session or legacy anonymous cookie
+ * (`withRequestOwnerId`) and is never a request parameter. Reads and writes go
+ * through the owner-bound document store (`getOwnerScopedDocumentStore`), the
+ * same seam the runner binds for the stage tools. A stage is visible only to
+ * its resolved owner unless the explicit public-read policy allows it.
  *
  * The configured runtime gates the whole family: these routes serve the
  * workbench, which is agent-runtime territory, so a runtime that is off OR
@@ -35,8 +35,8 @@ function createStageId(): string {
 export async function GET(req: NextRequest) {
   if (!isAgentRuntimeConfigured()) return new Response('Not found', { status: 404 });
 
-  return withRequestOwnerId(req, async (ownerId, responseHeaders) => {
-    const store = await getOwnerScopedDocumentStore(ownerId);
+  return withRequestOwnerId(req, async (ownerId, responseHeaders, identity) => {
+    const store = await getOwnerScopedDocumentStore(ownerId, undefined, identity?.tenantId);
     const stages = await store.listDocuments();
     return ownerJson({ stages }, 200, responseHeaders);
   });
@@ -76,7 +76,7 @@ export async function POST(req: NextRequest) {
   }
   const trimmedDescription = description?.trim();
 
-  return withRequestOwnerId(req, async (ownerId, responseHeaders) => {
+  return withRequestOwnerId(req, async (ownerId, responseHeaders, identity) => {
     const id = createStageId();
     const now = Date.now();
     const outline: AppDocumentOutline = {
@@ -86,7 +86,7 @@ export async function POST(req: NextRequest) {
       createdAt: now,
       updatedAt: now,
     };
-    const store = await getOwnerScopedDocumentStore(ownerId);
+    const store = await getOwnerScopedDocumentStore(ownerId, undefined, identity?.tenantId);
     await store.saveDocument({
       stage: {
         id,

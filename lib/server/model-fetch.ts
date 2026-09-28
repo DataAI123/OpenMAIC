@@ -34,6 +34,7 @@ const FETCH_TIMEOUT_MS = 15_000;
 // Preserve the existing per-attempt allowance, with one retry and a finite
 // budget shared by every candidate and attempt in a discovery operation.
 const DISCOVERY_TIMEOUT_MS = 2 * FETCH_TIMEOUT_MS;
+const MAX_MODELS_RESPONSE_BYTES = 256 * 1024;
 
 function discoveryTimeout(): DOMException {
   return new DOMException('Model discovery timed out', 'TimeoutError');
@@ -119,7 +120,7 @@ interface ModelsApiResponse {
 export async function fetchModels(
   baseUrl: string,
   apiKey: string,
-  opts: { modelsUrlOverride?: string } = {},
+  opts: { modelsUrlOverride?: string; fetchImpl?: typeof fetch } = {},
 ): Promise<FetchedModel[]> {
   const candidates = buildModelsUrlCandidates(baseUrl, opts);
 
@@ -132,7 +133,12 @@ export async function fetchModels(
       const remaining = deadline - Date.now();
       if (remaining <= 0) throw discoveryTimeout();
       try {
-        body = await fetchModelsCandidate(url, apiKey, Math.min(FETCH_TIMEOUT_MS, remaining));
+        body = await fetchModelsCandidate(
+          url,
+          apiKey,
+          Math.min(FETCH_TIMEOUT_MS, remaining),
+          opts.fetchImpl ?? fetch,
+        );
         break;
       } catch (error) {
         // HTTP errors and malformed JSON are terminal. Only a transport failure
@@ -164,11 +170,12 @@ async function fetchModelsCandidate(
   url: string,
   apiKey: string,
   timeoutMs: number,
+  fetchImpl: typeof fetch,
 ): Promise<ModelsApiResponse | null> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(discoveryTimeout()), timeoutMs);
   try {
-    const res = await fetch(url, {
+    const res = await fetchImpl(url, {
       method: 'GET',
       headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
       redirect: 'manual',
@@ -177,13 +184,15 @@ async function fetchModelsCandidate(
     if (res.status >= 300 && res.status < 400) {
       throw new ModelFetchError(res.status, 'Redirects are not allowed');
     }
-    if (res.ok) return (await res.json()) as ModelsApiResponse;
+    if (res.ok) {
+      const bytes = await readBoundedResponse(res, MAX_MODELS_RESPONSE_BYTES);
+      return JSON.parse(new TextDecoder().decode(bytes)) as ModelsApiResponse;
+    }
     if (res.status === 404 || res.status === 405) return null;
 
-    // A stalled error body must not hide an already-known authentication/HTTP
-    // status, or turn a terminal HTTP error into a retryable timeout.
-    const text = await res.text().catch(() => '');
-    throw new ModelFetchError(res.status, `HTTP ${res.status}: ${text.slice(0, 512)}`);
+    // Upstream error bodies can contain credentials or attacker-controlled
+    // content. Status is sufficient for the route's stable public contract.
+    throw new ModelFetchError(res.status, `HTTP ${res.status}`);
   } catch (error) {
     if (error instanceof ModelFetchError) throw error;
     if (controller.signal.aborted) throw controller.signal.reason;
@@ -193,6 +202,39 @@ async function fetchModelsCandidate(
     // Release unread redirect/404/405 bodies before trying another endpoint.
     controller.abort();
   }
+}
+
+async function readBoundedResponse(response: Response, maximumBytes: number): Promise<Uint8Array> {
+  const declaredLength = Number(response.headers.get('content-length'));
+  if (Number.isFinite(declaredLength) && declaredLength > maximumBytes) {
+    await response.body?.cancel().catch(() => undefined);
+    throw new ModelFetchError(502, 'Provider response is too large');
+  }
+  if (!response.body) return new Uint8Array();
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > maximumBytes) {
+        await reader.cancel().catch(() => undefined);
+        throw new ModelFetchError(502, 'Provider response is too large');
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const result = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) {
+    result.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return result;
 }
 
 /** Error carrying the upstream HTTP status so the route can map it (401 vs 404). */

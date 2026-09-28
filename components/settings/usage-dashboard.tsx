@@ -20,6 +20,7 @@ interface Bucket {
   kind: UsageKind;
   unit: UsageUnit;
   requests: number;
+  estimatedTokens: number;
   totalTokens: number;
   quantity: number;
 }
@@ -209,6 +210,14 @@ export function UsageDashboard() {
                   <span className="text-muted-foreground">{t(KIND_LABEL_KEY[s.kind])}</span>
                   <span className="ml-2 font-medium">{usageDisplay(s.summary)}</span>
                   <span className="ml-1 text-xs text-muted-foreground">({s.summary.requests})</span>
+                  {s.summary.kind === 'llm' && s.summary.estimatedTokens > 0 && (
+                    <span
+                      className="ml-2 text-xs text-muted-foreground"
+                      title={t('settings.usage.estimatedQuotaTokens')}
+                    >
+                      {fmtNum(s.summary.estimatedTokens)} {t('settings.usage.estimatedQuotaTokens')}
+                    </span>
+                  )}
                 </div>
               ),
           )}
@@ -251,7 +260,14 @@ export function UsageDashboard() {
                 <tr key={m.key} className="border-t">
                   <td className="px-3 py-2 font-mono text-xs">{m.key}</td>
                   <td className="px-3 py-2 text-right">{m.requests}</td>
-                  <td className="px-3 py-2 text-right">{usageDisplay(m)}</td>
+                  <td className="px-3 py-2 text-right">
+                    <div>{usageDisplay(m)}</div>
+                    {m.kind === 'llm' && m.estimatedTokens > 0 && (
+                      <div className="text-xs text-muted-foreground">
+                        {fmtNum(m.estimatedTokens)} {t('settings.usage.estimatedQuotaTokens')}
+                      </div>
+                    )}
+                  </td>
                 </tr>
               ))}
             </tbody>

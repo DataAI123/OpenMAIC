@@ -6,10 +6,11 @@
  * store to the app's PostgreSQL pool through `user-skill-store.ts`, so tools,
  * routes and the runner import from one place.
  *
- * The owner model here is the anonymous-cookie owner from
- * `lib/server/agent-runtime/owner.ts`. There is deliberately no owner-merge
- * machinery: identity consolidation is a live-product concern, and the
- * `resolveFinalOwner` seam on the agent-session store is left untouched.
+ * Callers pass the owner resolved by the shared request/session boundary:
+ * either a database-backed OIDC user or a legacy anonymous-cookie identity.
+ * There is deliberately no owner-merge machinery: identity consolidation is
+ * a separate product flow, and the `resolveFinalOwner` seam on the
+ * agent-session store is left untouched.
  */
 import type {
   UserSkillPatchOpInput,

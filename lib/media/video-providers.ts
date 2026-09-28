@@ -21,8 +21,10 @@ import { generateWithHappyHorse, testHappyHorseConnectivity } from './adapters/h
 import {
   generateWithOpenRouterVideo,
   testOpenRouterVideoConnectivity,
+  OPENROUTER_VIDEO_KEY_PROBE,
 } from './adapters/openrouter-video-adapter';
 import { OPENROUTER_DEFAULT_BASE_URL } from './adapters/openrouter-image-adapter';
+import type { ProviderKeyProbe } from './provider-key-probe';
 
 export const VIDEO_PROVIDERS: Record<VideoProviderId, VideoProviderConfig> = {
   seedance: {
@@ -167,6 +169,20 @@ export async function testVideoConnectivity(
         success: false,
         message: `Unsupported video provider: ${config.providerId}`,
       };
+  }
+}
+
+/**
+ * Resolve the neutral key probe a capability route may use to verify a BYOK
+ * key without generating anything. Returns undefined for providers that have no
+ * verification surface.
+ */
+export function resolveVideoKeyProbe(providerId: string): ProviderKeyProbe | undefined {
+  switch (providerId) {
+    case 'openrouter-video':
+      return OPENROUTER_VIDEO_KEY_PROBE;
+    default:
+      return undefined;
   }
 }
 

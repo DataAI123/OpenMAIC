@@ -12,7 +12,8 @@ import { notifyDurableAgentEvent } from './event-notify-bus';
 
 interface AgentSessionStoreState {
   connectionString?: string;
-  storePromise?: Promise<PgAgentSessionStore>;
+  /** One store per (connection string, tenant); empty-string key = legacy. */
+  stores?: Map<string, Promise<PgAgentSessionStore>>;
 }
 
 const AGENT_SESSION_STORE_STATE_KEY = Symbol.for('openmaic.agent-session.store');
@@ -42,7 +43,10 @@ export function nodePostgresTransaction(pool: Pool): WithTransaction {
   };
 }
 
-async function createAgentSessionStore(connectionString: string): Promise<PgAgentSessionStore> {
+async function createAgentSessionStore(
+  connectionString: string,
+  tenantId: string | undefined,
+): Promise<PgAgentSessionStore> {
   const { pool } = await getServerPersistenceProvider(connectionString);
   await ensureAgentSessionSchema(pool);
   // URL observations from user-authored prompt/message text are registered
@@ -52,6 +56,9 @@ async function createAgentSessionStore(connectionString: string): Promise<PgAgen
   // store is constructed, so the closure reference is always assigned.
   const store: PgAgentSessionStore = new PgAgentSessionStore(pool, {
     withTransaction: nodePostgresTransaction(pool),
+    // A tenant-bound store can only ever read or write its own tenant's rows.
+    // Absent in legacy anonymous mode, which has no tenant dimension.
+    ...(tenantId === undefined ? {} : { tenantScope: tenantId }),
     onSessionCreated: async (transaction, meta): Promise<void> => {
       await store.registerSessionUrls(
         meta.id,
@@ -84,27 +91,32 @@ async function createAgentSessionStore(connectionString: string): Promise<PgAgen
 }
 
 /**
- * Return the process-wide agent-session store, initializing its schema lazily.
- * Failed initialization is cleared so a later request can retry after the
- * database becomes available.
+ * Return the process-wide agent-session store for one tenant, initializing its
+ * schema lazily. `tenantId` is resolved server-side (from the application
+ * session) and never from request input; omitted means the legacy anonymous
+ * store, which has no tenant dimension. A failed initialization clears only its
+ * own entry so a later request can retry after the database becomes available,
+ * leaving other tenants' initialized stores valid.
  */
-export function getAgentSessionStore(): Promise<PgAgentSessionStore> {
+export function getAgentSessionStore(tenantId?: string): Promise<PgAgentSessionStore> {
   const connectionString = process.env.DATABASE_URL;
   if (!connectionString) {
     return Promise.reject(new Error('Agent runtime requires DATABASE_URL'));
   }
-  if (storeState.storePromise && storeState.connectionString === connectionString) {
-    return storeState.storePromise;
+  if (storeState.connectionString !== connectionString) {
+    // A changed connection string invalidates every cached store, tenant or not.
+    storeState.connectionString = connectionString;
+    storeState.stores = new Map();
   }
+  const stores = (storeState.stores ??= new Map());
+  const key = tenantId ?? '';
+  const existing = stores.get(key);
+  if (existing) return existing;
 
-  storeState.connectionString = connectionString;
-  const initialization = createAgentSessionStore(connectionString).catch((error) => {
-    if (storeState.storePromise === initialization) {
-      storeState.storePromise = undefined;
-      storeState.connectionString = undefined;
-    }
+  const initialization = createAgentSessionStore(connectionString, tenantId).catch((error) => {
+    if (stores.get(key) === initialization) stores.delete(key);
     throw error;
   });
-  storeState.storePromise = initialization;
+  stores.set(key, initialization);
   return initialization;
 }

@@ -19,6 +19,7 @@ import {
 } from '@/lib/server/agent-runtime/session-materials';
 import { withRequestOwnerId } from '@/lib/server/agent-runtime/with-owner';
 import { buildRequestOrigin, isValidClassroomId } from '@/lib/server/classroom-storage';
+import { resolveStageAccess } from '@/lib/server/stage-access';
 import { decodeCourseRefs } from '@/lib/workbench/course-refs';
 
 export const runtime = 'nodejs';
@@ -90,7 +91,17 @@ export async function POST(req: NextRequest) {
     return apiError('INVALID_REQUEST', 400, decodedCourseRefs.error);
   }
 
-  return withRequestOwnerId(req, async (ownerId, responseHeaders) => {
+  return withRequestOwnerId(req, async (ownerId, responseHeaders, identity) => {
+    if (existingCourse && stageId) {
+      const access = await resolveStageAccess(stageId);
+      // Attaching an agent session grants its tools the ability to operate on
+      // the selected course. A valid id or public read permission is not
+      // enough: the course must belong to this request's owner.
+      if (!access || access.ownerId !== ownerId) {
+        return new Response('Not found', { status: 404, headers: responseHeaders });
+      }
+    }
+
     // An EXPLICIT skill — a `?skill=` launch link, not composer UI — is
     // rejected here rather than at claim time: a session created with a typo'd
     // skill would otherwise sit queued and then quietly build an ordinary
@@ -131,11 +142,7 @@ export async function POST(req: NextRequest) {
      */
     const skillId = explicitSkillId ?? (await inferSkillIdFromPrompt(prompt, ownerId));
 
-    // Upstream classrooms do not carry an owner partition, so existing-course
-    // sessions validate only the identifier format here. Full existence and
-    // ownership validation is deferred until a later slice consumes stageId —
-    // the upstream document store has no owner partition yet.
-    const store = await getAgentSessionStore();
+    const store = await getAgentSessionStore(identity?.tenantId);
     const hasOpeningContext = materialIds.length > 0 || decodedCourseRefs.refs.length > 0;
     const meta = await store.createSession({
       ownerId,
@@ -151,7 +158,7 @@ export async function POST(req: NextRequest) {
     });
 
     if (!hasOpeningContext) {
-      if (!existingCourse) scheduleConversationTitle(meta.id, ownerId);
+      if (!existingCourse) scheduleConversationTitle(meta.id, ownerId, identity?.tenantId);
       return NextResponse.json(meta, { status: 202, headers: responseHeaders });
     }
 
@@ -169,7 +176,7 @@ export async function POST(req: NextRequest) {
         },
         { expectedOwnerId: ownerId },
       );
-      if (openingText) scheduleConversationTitle(meta.id, ownerId);
+      if (openingText) scheduleConversationTitle(meta.id, ownerId, identity?.tenantId);
       return NextResponse.json(
         {
           ...meta,
@@ -193,8 +200,8 @@ export async function GET(req: NextRequest) {
     return new Response('Not found', { status: 404 });
   }
 
-  return withRequestOwnerId(req, async (ownerId, responseHeaders) => {
-    const store = await getAgentSessionStore();
+  return withRequestOwnerId(req, async (ownerId, responseHeaders, identity) => {
+    const store = await getAgentSessionStore(identity?.tenantId);
     const sessions = await store.listSessionsByOwner(ownerId);
     return NextResponse.json(sessions, { headers: responseHeaders });
   });

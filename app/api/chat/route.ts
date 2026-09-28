@@ -16,9 +16,15 @@ import { NextRequest } from 'next/server';
 import { statelessGenerate } from '@/lib/orchestration/stateless-generate';
 import { isProviderKeyRequired } from '@/lib/ai/providers';
 import type { StatelessChatRequest, StatelessEvent } from '@/lib/types/chat';
-import { apiError } from '@/lib/server/api-response';
+import { apiError, type ApiErrorCode } from '@/lib/server/api-response';
 import { createLogger } from '@/lib/logger';
 import { resolveModel } from '@/lib/server/resolve-model';
+import { withRequestOwnerId } from '@/lib/server/agent-runtime/with-owner';
+import {
+  consumeActionRateLimit,
+  UserApiRateLimitExceededError,
+} from '@/lib/server/user-api-rate-limit';
+import { withOwnerResponseHeaders } from '@/lib/server/agent-runtime/route-response';
 import type { ThinkingConfig } from '@/lib/types/provider';
 const log = createLogger('Chat API');
 
@@ -42,166 +48,181 @@ export const maxDuration = 60;
  * Response: SSE stream of StatelessEvent
  */
 export async function POST(req: NextRequest) {
-  const encoder = new TextEncoder();
-  let chatModel: string | undefined;
-  let chatMessageCount: number | undefined;
-
-  try {
-    const body: StatelessChatRequest = await req.json();
-    chatModel = body.model;
-    chatMessageCount = body.messages?.length;
-
-    // Validate required fields
-    if (!body.messages || !Array.isArray(body.messages)) {
-      return apiError('MISSING_REQUIRED_FIELD', 400, 'Missing required field: messages');
+  return withRequestOwnerId(req, async (ownerId, responseHeaders) => {
+    const fail = (code: ApiErrorCode, status: number, error: string, details?: string) =>
+      withOwnerResponseHeaders(apiError(code, status, error, details), responseHeaders);
+    try {
+      await consumeActionRateLimit(ownerId, 'api_chat');
+    } catch (error) {
+      if (error instanceof UserApiRateLimitExceededError) {
+        responseHeaders.set('Retry-After', String(error.retryAfterSeconds));
+        return fail('RATE_LIMITED', 429, 'Too many chat turns');
+      }
+      return fail('INTERNAL_ERROR', 503, 'Rate limiting is unavailable');
     }
+    const encoder = new TextEncoder();
+    let chatModel: string | undefined;
+    let chatMessageCount: number | undefined;
 
-    if (!body.storeState) {
-      return apiError('MISSING_REQUIRED_FIELD', 400, 'Missing required field: storeState');
-    }
+    try {
+      const body: StatelessChatRequest = await req.json();
+      chatModel = body.model;
+      chatMessageCount = body.messages?.length;
 
-    if (!body.config || !body.config.agentIds || body.config.agentIds.length === 0) {
-      return apiError('MISSING_REQUIRED_FIELD', 400, 'Missing required field: config.agentIds');
-    }
+      // Validate required fields
+      if (!body.messages || !Array.isArray(body.messages)) {
+        return fail('MISSING_REQUIRED_FIELD', 400, 'Missing required field: messages');
+      }
 
-    const {
-      model: languageModel,
-      apiKey: resolvedApiKey,
-      providerId,
-      thinkingConfig: resolvedThinking,
-    } = await resolveModel({
-      modelString: body.model,
-      stage: 'chat-adapter',
-      apiKey: body.apiKey,
-      baseUrl: body.baseUrl,
-      providerType: body.providerType,
-      // Let resolveModel arbitrate thinking too: a routed chat-adapter's thinking
-      // wins, an unrouted one honors this client thinking (see resolve-model.ts).
-      thinkingConfig: body.thinkingConfig ?? body.thinking,
-    });
+      if (!body.storeState) {
+        return fail('MISSING_REQUIRED_FIELD', 400, 'Missing required field: storeState');
+      }
 
-    if (isProviderKeyRequired(providerId) && !resolvedApiKey) {
-      return apiError('MISSING_API_KEY', 401, 'API Key is required');
-    }
+      if (!body.config || !body.config.agentIds || body.config.agentIds.length === 0) {
+        return fail('MISSING_REQUIRED_FIELD', 400, 'Missing required field: config.agentIds');
+      }
 
-    log.info('Processing request');
-    log.info(
-      `Agents: ${body.config.agentIds.join(', ')}, Messages: ${body.messages.length}, Turn: ${body.directorState?.turnCount ?? 0}`,
-    );
+      const {
+        model: languageModel,
+        apiKey: resolvedApiKey,
+        providerId,
+        thinkingConfig: resolvedThinking,
+      } = await resolveModel({
+        modelString: body.model,
+        stage: 'chat-adapter',
+        apiKey: body.apiKey,
+        baseUrl: body.baseUrl,
+        providerType: body.providerType,
+        // Let resolveModel arbitrate thinking too: a routed chat-adapter's thinking
+        // wins, an unrouted one honors this client thinking (see resolve-model.ts).
+        thinkingConfig: body.thinkingConfig ?? body.thinking,
+      });
 
-    // Use the native request signal for abort propagation
-    const signal = req.signal;
+      if (isProviderKeyRequired(providerId) && !resolvedApiKey) {
+        return fail('MISSING_API_KEY', 401, 'API Key is required');
+      }
 
-    // Create SSE stream
-    const { readable, writable } = new TransformStream();
-    const writer = writable.getWriter();
+      log.info('Processing request');
+      log.info(
+        `Agents: ${body.config.agentIds.join(', ')}, Messages: ${body.messages.length}, Turn: ${body.directorState?.turnCount ?? 0}`,
+      );
 
-    // Stream generation in background with heartbeat to prevent connection timeout
-    const HEARTBEAT_INTERVAL_MS = 15_000;
-    (async () => {
-      // Heartbeat: periodically send SSE comments to keep the connection alive.
-      // Proxies / browsers may close idle SSE connections after 30-120s of silence.
-      let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
-      const startHeartbeat = () => {
-        stopHeartbeat();
-        heartbeatTimer = setInterval(() => {
-          try {
-            writer.write(encoder.encode(`:heartbeat\n\n`)).catch(() => stopHeartbeat());
-          } catch {
-            stopHeartbeat();
+      // Use the native request signal for abort propagation
+      const signal = req.signal;
+
+      // Create SSE stream
+      const { readable, writable } = new TransformStream();
+      const writer = writable.getWriter();
+
+      // Stream generation in background with heartbeat to prevent connection timeout
+      const HEARTBEAT_INTERVAL_MS = 15_000;
+      (async () => {
+        // Heartbeat: periodically send SSE comments to keep the connection alive.
+        // Proxies / browsers may close idle SSE connections after 30-120s of silence.
+        let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+        const startHeartbeat = () => {
+          stopHeartbeat();
+          heartbeatTimer = setInterval(() => {
+            try {
+              writer.write(encoder.encode(`:heartbeat\n\n`)).catch(() => stopHeartbeat());
+            } catch {
+              stopHeartbeat();
+            }
+          }, HEARTBEAT_INTERVAL_MS);
+        };
+        const stopHeartbeat = () => {
+          if (heartbeatTimer) {
+            clearInterval(heartbeatTimer);
+            heartbeatTimer = null;
           }
-        }, HEARTBEAT_INTERVAL_MS);
-      };
-      const stopHeartbeat = () => {
-        if (heartbeatTimer) {
-          clearInterval(heartbeatTimer);
-          heartbeatTimer = null;
-        }
-      };
-
-      try {
-        startHeartbeat();
-
-        // Use the resolved thinking (route-pinned for a routed chat-adapter,
-        // else the client's). Default to disabled for low-latency chat.
-        const thinkingConfig: ThinkingConfig = resolvedThinking ?? {
-          mode: 'disabled',
-          enabled: false,
         };
 
-        const generator = statelessGenerate(
-          {
-            ...body,
-            apiKey: resolvedApiKey,
-          },
-          signal,
-          languageModel,
-          thinkingConfig,
-        );
+        try {
+          startHeartbeat();
 
-        for await (const event of generator) {
-          if (signal.aborted) {
-            log.info('Request was aborted');
-            break;
+          // Use the resolved thinking (route-pinned for a routed chat-adapter,
+          // else the client's). Default to disabled for low-latency chat.
+          const thinkingConfig: ThinkingConfig = resolvedThinking ?? {
+            mode: 'disabled',
+            enabled: false,
+          };
+
+          const generator = statelessGenerate(
+            {
+              ...body,
+              apiKey: resolvedApiKey,
+            },
+            signal,
+            languageModel,
+            thinkingConfig,
+          );
+
+          for await (const event of generator) {
+            if (signal.aborted) {
+              log.info('Request was aborted');
+              break;
+            }
+
+            const data = `data: ${JSON.stringify(event)}\n\n`;
+            await writer.write(encoder.encode(data));
           }
 
-          const data = `data: ${JSON.stringify(event)}\n\n`;
-          await writer.write(encoder.encode(data));
-        }
+          stopHeartbeat();
+          await writer.close();
+        } catch (error) {
+          stopHeartbeat();
 
-        stopHeartbeat();
-        await writer.close();
-      } catch (error) {
-        stopHeartbeat();
+          // If aborted, just close the writer silently
+          if (signal.aborted) {
+            log.info('Request aborted during streaming');
+            try {
+              await writer.close();
+            } catch {
+              /* already closed */
+            }
+            return;
+          }
 
-        // If aborted, just close the writer silently
-        if (signal.aborted) {
-          log.info('Request aborted during streaming');
+          log.error(
+            `Chat stream error [model=${body.model ?? 'unknown'}, agents=${body.config?.agentIds?.length ?? 0}, messages=${body.messages?.length ?? 0}]:`,
+            error,
+          );
+
+          // Try to send error event
           try {
+            const errorEvent: StatelessEvent = {
+              type: 'error',
+              data: {
+                message: error instanceof Error ? error.message : String(error),
+              },
+            };
+            await writer.write(encoder.encode(`data: ${JSON.stringify(errorEvent)}\n\n`));
             await writer.close();
           } catch {
-            /* already closed */
+            // Writer may already be closed
           }
-          return;
         }
+      })();
 
-        log.error(
-          `Chat stream error [model=${body.model ?? 'unknown'}, agents=${body.config?.agentIds?.length ?? 0}, messages=${body.messages?.length ?? 0}]:`,
-          error,
-        );
-
-        // Try to send error event
-        try {
-          const errorEvent: StatelessEvent = {
-            type: 'error',
-            data: {
-              message: error instanceof Error ? error.message : String(error),
-            },
-          };
-          await writer.write(encoder.encode(`data: ${JSON.stringify(errorEvent)}\n\n`));
-          await writer.close();
-        } catch {
-          // Writer may already be closed
-        }
-      }
-    })();
-
-    return new Response(readable, {
-      headers: {
-        'Content-Type': 'text/event-stream',
-        'Cache-Control': 'no-cache',
-        Connection: 'keep-alive',
-      },
-    });
-  } catch (error) {
-    log.error(
-      `Chat request failed [model=${chatModel ?? 'unknown'}, messages=${chatMessageCount ?? 0}]:`,
-      error,
-    );
-    return apiError(
-      'INTERNAL_ERROR',
-      500,
-      error instanceof Error ? error.message : 'Failed to process request',
-    );
-  }
+      const streamResponse = new Response(readable, {
+        headers: {
+          'Content-Type': 'text/event-stream',
+          'Cache-Control': 'no-cache',
+          Connection: 'keep-alive',
+        },
+      });
+      for (const [key, value] of responseHeaders) streamResponse.headers.append(key, value);
+      return streamResponse;
+    } catch (error) {
+      log.error(
+        `Chat request failed [model=${chatModel ?? 'unknown'}, messages=${chatMessageCount ?? 0}]:`,
+        error,
+      );
+      return fail(
+        'INTERNAL_ERROR',
+        500,
+        error instanceof Error ? error.message : 'Failed to process request',
+      );
+    }
+  });
 }

@@ -65,13 +65,17 @@ function mapSaveError(error: unknown, headers: Headers) {
 export async function GET(req: NextRequest, { params }: Params) {
   if (!isAgentRuntimeConfigured()) return new Response('Not found', { status: 404 });
 
-  return withRequestOwnerId(req, async (ownerId, responseHeaders) => {
-    const { id } = await params;
-    const store = await getOwnerScopedDocumentStore(ownerId);
-    const document = await store.loadDocument(id);
-    if (!document) return ownerNotFound(responseHeaders);
-    return ownerJson(document, 200, responseHeaders);
-  });
+  return withRequestOwnerId(
+    req,
+    async (ownerId, responseHeaders, identity) => {
+      const { id } = await params;
+      const store = await getOwnerScopedDocumentStore(ownerId, undefined, identity?.tenantId);
+      const document = await store.loadDocument(id);
+      if (!document) return ownerNotFound(responseHeaders);
+      return ownerJson(document, 200, responseHeaders);
+    },
+    { allowAnonymousPublicRead: () => true },
+  );
 }
 
 // PATCH /api/stages/[id] — rename the course (owner-only).
@@ -97,9 +101,9 @@ export async function PATCH(req: NextRequest, { params }: Params) {
     );
   }
 
-  return withRequestOwnerId(req, async (ownerId, responseHeaders) => {
+  return withRequestOwnerId(req, async (ownerId, responseHeaders, identity) => {
     const { id } = await params;
-    const store = await getOwnerScopedDocumentStore(ownerId);
+    const store = await getOwnerScopedDocumentStore(ownerId, undefined, identity?.tenantId);
     const document = await store.loadDocument(id);
     if (!document) return ownerNotFound(responseHeaders);
     try {
@@ -143,7 +147,7 @@ export async function PUT(req: NextRequest, { params }: Params) {
     );
   }
 
-  return withRequestOwnerId(req, async (ownerId, responseHeaders) => {
+  return withRequestOwnerId(req, async (ownerId, responseHeaders, identity) => {
     const { id } = await params;
     if (candidate.stage!.id !== id) {
       return ownerApiError(
@@ -153,7 +157,7 @@ export async function PUT(req: NextRequest, { params }: Params) {
         responseHeaders,
       );
     }
-    const store = await getOwnerScopedDocumentStore(ownerId);
+    const store = await getOwnerScopedDocumentStore(ownerId, undefined, identity?.tenantId);
     // Save is existence-gated (the reference's update path is too): PUT
     // updates a course that exists; it must not resurrect a deleted one or
     // mint a course under a client-chosen id. The owner scope is re-checked
@@ -180,9 +184,9 @@ export async function PUT(req: NextRequest, { params }: Params) {
 export async function DELETE(req: NextRequest, { params }: Params) {
   if (!isAgentRuntimeConfigured()) return new Response('Not found', { status: 404 });
 
-  return withRequestOwnerId(req, async (ownerId, responseHeaders) => {
+  return withRequestOwnerId(req, async (ownerId, responseHeaders, identity) => {
     const { id } = await params;
-    const store = await getOwnerScopedDocumentStore(ownerId);
+    const store = await getOwnerScopedDocumentStore(ownerId, undefined, identity?.tenantId);
     await store.deleteDocument(id);
     return ownerJson({ ok: true }, 200, responseHeaders);
   });

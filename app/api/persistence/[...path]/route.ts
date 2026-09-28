@@ -26,6 +26,8 @@ import {
   type PersistencePoolFactory,
 } from '@/lib/persistence/server-provider';
 import { readStageMeta } from '@/lib/persistence/stage-meta';
+import { isOwnerReadEnforcementEnabled } from '@/lib/persistence/owner-read-policy';
+import { resolveOidcAssetPrincipal } from '@/lib/persistence/oidc-asset-access';
 import { APP_RUNTIME_PAYLOAD_VALIDATORS } from '@/lib/runtime/payload-validators';
 import { withRequestOwnerId } from '@/lib/server/agent-runtime/with-owner';
 
@@ -88,7 +90,9 @@ async function createPersistenceHandler(
   ownerId: string,
   access: DocumentAccess,
   poolFactory?: PersistencePoolFactory,
+  tenantId?: string,
 ): Promise<RequestListener> {
+  const oidcEnabled = process.env.OPENMAIC_AUTH_MODE?.trim() === 'oidc';
   const { pool, runtimeStore, assetStore } = await getServerPersistenceProvider(
     connectionString,
     poolFactory,
@@ -96,44 +100,16 @@ async function createPersistenceHandler(
   const documentStore = createOwnerBoundDocumentStore({
     pool,
     ownerId,
+    ...(tenantId === undefined ? {} : { tenantId }),
     validateScene: validateAppScene,
     validateStage: validateAppStage,
   });
-  // The asset posture, precisely.
-  //
-  // Reading an asset and allocating one are open to any caller this deployment
-  // lets in, exactly as reading a document and creating one already are: assets
-  // live in a single shared partition by design (see the SHARED_ASSET_PRINCIPAL
-  // comment in lib/persistence/server-auth.ts), so there is nothing per-caller
-  // for the development authenticator to decide about them, and routing them
-  // through it made every asset request fail in a production build that had not
-  // opted into that authenticator — the build this project's own
-  // server-persistence recipe produces.
-  //
-  // Replacing and deleting are refused outright — to everyone, authenticated or
-  // not. Those operations scope by principal key alone, and every caller
-  // resolves to the same shared key, so authentication decides nothing here:
-  // any signed-in visitor who learned an id, and a document read hands out
-  // every id its slides name, could overwrite or destroy another author's
-  // media. There is no per-asset ownership to check against yet, and since this
-  // application began storing generated media the registry is the only copy a
-  // course has, so the answer is no mutations at all. Nothing in the app
-  // performs an asset PUT or DELETE, and none needs to: the server owns the
-  // entry lifecycle. A document write records what that document claims in the
-  // reference table and commits the allocations it names; deleting the document
-  // withdraws those claims; the collector's entry pass releases an entry whose
-  // last claim left longer ago than the grace period, and an allocation no
-  // document ever claimed once its pending TTL expires. The bytes follow after
-  // their own grace.
-  //
-  // What this is NOT: a per-caller access control. The deployment-level fence
-  // is the access code. Allocation is bounded by the asset store's per-principal
-  // quota, which with one shared principal is a deployment-wide cap.
-  //
-  // Runtime requests still take their partition key from a client-supplied
-  // header, because a runtime session genuinely is per-learner state. Before
-  // runtime routes carry production data, their authenticator must be replaced
-  // with real session verification.
+  // OIDC allocations get a per-user principal. Reads resolve the entry's
+  // principal only when it belongs to this user or is referenced by an active
+  // public course whose owner matches the asset principal (legacy shared assets
+  // are public only when referenced by a published legacy anonymous course).
+  // Asset replacement and deletion remain disabled; the document store and
+  // collector own their lifecycle.
   // Reclamation is not scheduled from here, and must not be: a route module
   // has no once-per-process guarantee and no shutdown hook. AssetCollector
   // runs from instrumentation.ts instead, over the byte store this same
@@ -147,6 +123,18 @@ async function createPersistenceHandler(
   );
   return createStorageHttpHandler(runtimeStore, documentStore, {
     authenticate: async (request) => {
+      if (oidcEnabled) {
+        if (request.url?.startsWith('/documents')) return { learnerKey: ownerId };
+        if (request.url?.startsWith('/runtime')) return { learnerKey: ownerId };
+        const { pool: assetAccessPool } = await getServerPersistenceProvider(
+          connectionString,
+          poolFactory,
+        );
+        return resolveOidcAssetPrincipal(assetAccessPool, ownerId, {
+          method: request.method ?? 'GET',
+          url: request.url ?? '/',
+        });
+      }
       if (request.url?.startsWith('/documents')) return { learnerKey: ownerId };
       if (request.url?.startsWith('/assets')) {
         return { key: SHARED_ASSET_PRINCIPAL, learnerKey: ownerId };
@@ -171,7 +159,7 @@ async function createPersistenceHandler(
   });
 }
 
-function routeRelativePath(request: Request): string {
+function routeRelativePath(request: Pick<Request, 'url'>): string {
   const pathname = new URL(request.url).pathname;
   return pathname.startsWith(ROUTE_PREFIX) ? pathname.slice(ROUTE_PREFIX.length) || '/' : pathname;
 }
@@ -351,7 +339,8 @@ async function handlePersistenceRequestInner(
   if (!connectionString) {
     return jsonError(404, 'PERSISTENCE_NOT_CONFIGURED', 'server persistence not configured');
   }
-  if (!process.env.PERSISTENCE_DEV_TOKEN) {
+  const oidcEnabled = process.env.OPENMAIC_AUTH_MODE?.trim() === 'oidc';
+  if (!oidcEnabled && !process.env.PERSISTENCE_DEV_TOKEN) {
     return jsonError(
       503,
       'PERSISTENCE_DEV_TOKEN_MISSING',
@@ -359,46 +348,67 @@ async function handlePersistenceRequestInner(
     );
   }
 
-  return withRequestOwnerId(request, async (ownerId, responseHeaders) => {
-    try {
-      const path = routeRelativePath(request);
-      const action = parseDocumentAction(request.method, path);
-      let access: DocumentAccess = 'allow';
-      if (path === '/documents' || path.startsWith('/documents/')) {
-        const { pool } = await getServerPersistenceProvider(connectionString, deps.poolFactory);
-        const queryable = pool;
-        access = await decideDocumentAccess(
-          action,
-          ownerId,
-          (stageId) => readStageMeta(queryable, stageId),
-          (stageId) =>
-            pool
-              .query('SELECT 1 FROM document_stages WHERE id = $1', [stageId])
-              .then((result) => result.rows.length > 0),
-          (stageId) => readStageMeta(queryable, stageId),
-        );
-      }
+  return withRequestOwnerId(
+    request,
+    async (ownerId, responseHeaders, identity) => {
+      try {
+        const path = routeRelativePath(request);
+        const action = parseDocumentAction(request.method, path);
+        let access: DocumentAccess = 'allow';
+        if (path === '/documents' || path.startsWith('/documents/')) {
+          const { pool } = await getServerPersistenceProvider(connectionString, deps.poolFactory);
+          const queryable = pool;
+          access = await decideDocumentAccess(
+            action,
+            ownerId,
+            (stageId) => readStageMeta(queryable, stageId),
+            (stageId) =>
+              pool
+                .query('SELECT 1 FROM document_stages WHERE id = $1', [stageId])
+                .then((result) => result.rows.length > 0),
+            (stageId) => readStageMeta(queryable, stageId),
+            isOwnerReadEnforcementEnabled(),
+          );
+        }
 
-      const response =
-        access === 'not-found'
-          ? jsonError(404, 'DOCUMENT_NOT_FOUND', '@openmaic/storage: document not found')
-          : await runNodeHandler(
-              await createPersistenceHandler(connectionString, ownerId, access, deps.poolFactory),
-              request,
-            );
-      for (const [name, value] of responseHeaders.entries()) response.headers.append(name, value);
-      return response;
-    } catch (error) {
-      console.error('Embedded persistence route initialization failed', error);
-      const response = jsonError(
-        500,
-        'PERSISTENCE_INIT_FAILED',
-        'server persistence initialization failed',
-      );
-      for (const [name, value] of responseHeaders.entries()) response.headers.append(name, value);
-      return response;
-    }
-  });
+        const response =
+          access === 'not-found'
+            ? jsonError(404, 'DOCUMENT_NOT_FOUND', '@openmaic/storage: document not found')
+            : await runNodeHandler(
+                await createPersistenceHandler(
+                  connectionString,
+                  ownerId,
+                  access,
+                  deps.poolFactory,
+                  identity?.tenantId,
+                ),
+                request,
+              );
+        for (const [name, value] of responseHeaders.entries()) response.headers.append(name, value);
+        return response;
+      } catch (error) {
+        console.error('Embedded persistence route initialization failed', error);
+        const response = jsonError(
+          500,
+          'PERSISTENCE_INIT_FAILED',
+          'server persistence initialization failed',
+        );
+        for (const [name, value] of responseHeaders.entries()) response.headers.append(name, value);
+        return response;
+      }
+    },
+    {
+      allowAnonymousPublicRead: (publicRequest) =>
+        parseDocumentAction(publicRequest.method, routeRelativePath(publicRequest)).kind ===
+          'read' || isAssetContentRead(publicRequest),
+    },
+  );
+}
+
+function isAssetContentRead(request: Pick<Request, 'method' | 'url'>): boolean {
+  if (request.method.toUpperCase() !== 'GET') return false;
+  const pathname = new URL(request.url).pathname;
+  return /^\/api\/persistence\/assets\/[^/]+\/content$/.test(pathname);
 }
 
 export const GET = (request: Request) => handlePersistenceRequest(request);

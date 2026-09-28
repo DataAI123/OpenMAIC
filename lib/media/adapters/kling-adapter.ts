@@ -26,6 +26,7 @@ import type {
 import { probeAuth } from '../probe-auth';
 import { runPolledTask } from '../polled-task';
 import { requireModel } from '../require-model';
+import { videoProviderFetch } from '../provider-fetch';
 
 const DEFAULT_BASE_URL = 'https://api-beijing.klingai.com';
 const POLL_INTERVAL_MS = 5_000;
@@ -153,6 +154,7 @@ async function submitTask(
   token: string,
   model: string,
   options: VideoGenerationOptions,
+  pinSsrf: boolean,
 ): Promise<string> {
   const body: Record<string, unknown> = {
     model_name: model,
@@ -164,14 +166,18 @@ async function submitTask(
   if (options.duration) body.duration = String(options.duration);
   if (options.aspectRatio) body.aspect_ratio = options.aspectRatio;
 
-  const response = await fetch(`${baseUrl}/v1/videos/text2video`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${token}`,
+  const response = await videoProviderFetch(
+    { pinSsrfConnections: pinSsrf },
+    `${baseUrl}/v1/videos/text2video`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify(body),
     },
-    body: JSON.stringify(body),
-  });
+  );
 
   if (!response.ok) {
     const text = await response.text();
@@ -197,11 +203,16 @@ async function pollTask(
   baseUrl: string,
   token: string,
   taskId: string,
+  pinSsrf: boolean,
 ): Promise<KlingPollResponse['data']> {
-  const response = await fetch(`${baseUrl}/v1/videos/text2video/${taskId}`, {
-    method: 'GET',
-    headers: { Authorization: `Bearer ${token}` },
-  });
+  const response = await videoProviderFetch(
+    { pinSsrfConnections: pinSsrf },
+    `${baseUrl}/v1/videos/text2video/${taskId}`,
+    {
+      method: 'GET',
+      headers: { Authorization: `Bearer ${token}` },
+    },
+  );
 
   if (!response.ok) {
     const text = await response.text();
@@ -228,14 +239,15 @@ export async function generateWithKling(
   const baseUrl = config.baseUrl || DEFAULT_BASE_URL;
   const { accessKey, secretKey } = parseApiKey(config.apiKey);
   const token = generateJWT(accessKey, secretKey);
+  const pinSsrf = config.pinSsrfConnections === true;
 
   return runPolledTask<VideoGenerationResult>({
     submit: async () => ({
       status: 'submitted',
-      taskId: await submitTask(baseUrl, token, model, options),
+      taskId: await submitTask(baseUrl, token, model, options, pinSsrf),
     }),
     poll: async (taskId) => {
-      const result = await pollTask(baseUrl, token, taskId);
+      const result = await pollTask(baseUrl, token, taskId, pinSsrf);
 
       if (result.task_status === 'succeed') {
         const video = result.task_result?.videos?.[0];

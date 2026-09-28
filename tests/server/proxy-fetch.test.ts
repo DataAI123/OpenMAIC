@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { shouldBypassProxy } from '@/lib/server/proxy-fetch';
+import { redactProxyForLog, shouldBypassProxy } from '@/lib/server/proxy-fetch';
 
 const NO_PROXY_VARS = ['no_proxy', 'NO_PROXY'] as const;
 const saved: Record<string, string | undefined> = {};
@@ -79,5 +79,34 @@ describe('shouldBypassProxy', () => {
     process.env.no_proxy = 'example.com';
     expect(shouldBypassProxy(new URL('https://example.com/'))).toBe(true);
     delete process.env.no_proxy;
+  });
+});
+
+describe('redactProxyForLog', () => {
+  it('strips basic-auth userinfo so the password never reaches the log', () => {
+    const redacted = redactProxyForLog('http://user:p%40ss@proxy.corp:3128');
+    expect(redacted).not.toContain('user');
+    expect(redacted).not.toContain('p%40ss');
+    expect(redacted).not.toContain(':pass');
+    expect(redacted).toContain('proxy.corp');
+    expect(redacted).toContain('3128');
+  });
+
+  it('redacts a password-only credential', () => {
+    const redacted = redactProxyForLog('http://:secret@proxy.corp:3128');
+    expect(redacted).not.toContain('secret');
+    expect(redacted).toContain('proxy.corp');
+  });
+
+  it('leaves a credential-free proxy URL intact', () => {
+    expect(redactProxyForLog('http://proxy.corp:3128/')).toBe('http://proxy.corp:3128/');
+  });
+
+  it('never echoes an unparseable raw value (it may itself be the secret)', () => {
+    expect(redactProxyForLog('not a url with embedded:pw')).toBe('[redacted proxy URL]');
+  });
+
+  it('labels a missing proxy without throwing', () => {
+    expect(redactProxyForLog(undefined)).toBe('none');
   });
 });

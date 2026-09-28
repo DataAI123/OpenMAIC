@@ -3,6 +3,7 @@ import { promises as fs } from 'fs';
 import os from 'os';
 import path from 'path';
 import { recordUsage, readUsageRecords, type UsageRecordInput } from '@/lib/server/usage-storage';
+import { runWithUsageAttribution } from '@/lib/server/usage-attribution';
 
 let tmpDir: string;
 
@@ -67,6 +68,28 @@ describe('recordUsage — LLM', () => {
       { baseDir: tmpDir },
     );
     expect(await readUsageRecords({ baseDir: tmpDir })).toHaveLength(0);
+  });
+
+  it('persists conservative quota estimates even when the provider reports no usage', async () => {
+    await recordUsage(
+      {
+        ...llmInput,
+        usage: {
+          inputTokens: 0,
+          outputTokens: 0,
+          cacheReadTokens: 0,
+          cacheCreationTokens: 0,
+          reasoningTokens: 0,
+        },
+        quotaEstimatedTokens: 1_050_000,
+      },
+      { baseDir: tmpDir },
+    );
+
+    const [record] = await readUsageRecords({ baseDir: tmpDir });
+    expect(record.inputTokens).toBe(0);
+    expect(record.outputTokens).toBe(0);
+    expect(record.quotaEstimatedTokens).toBe(1_050_000);
   });
 });
 
@@ -170,5 +193,20 @@ describe('readUsageRecords', () => {
     const [r] = await readUsageRecords({ baseDir: dir });
     expect(r.kind).toBe('llm');
     expect(r.inputTokens).toBe(5);
+  });
+
+  it('filters by the exact server-resolved owner and excludes unattributed legacy rows', async () => {
+    await runWithUsageAttribution({ ownerId: 'user:alice', tenantId: 'default' }, () =>
+      recordUsage(llmInput, { baseDir: tmpDir }),
+    );
+    await runWithUsageAttribution({ ownerId: 'user:bob', tenantId: 'default' }, () =>
+      recordUsage({ ...llmInput, source: 'other-user' }, { baseDir: tmpDir }),
+    );
+    await recordUsage({ ...llmInput, source: 'legacy-unattributed' }, { baseDir: tmpDir });
+
+    const records = await readUsageRecords({ baseDir: tmpDir, ownerId: 'user:alice' });
+
+    expect(records).toHaveLength(1);
+    expect(records[0].ownerId).toBe('user:alice');
   });
 });

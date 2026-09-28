@@ -354,6 +354,8 @@ describe('scene API retry boundary', () => {
 
 function mockRequest(extraBody: Record<string, unknown> = {}) {
   return {
+    method: 'POST',
+    headers: new Headers(),
     json: async () => ({
       outline,
       allOutlines: [outline],

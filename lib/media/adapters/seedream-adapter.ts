@@ -21,6 +21,7 @@ import type {
 } from '../types';
 import { probeAuth } from '../probe-auth';
 import { requireModel } from '../require-model';
+import { imageProviderFetch } from '../provider-fetch';
 
 const DEFAULT_MODEL = 'doubao-seedream-5-0-260128';
 const DEFAULT_BASE_URL = 'https://ark.cn-beijing.volces.com';
@@ -91,19 +92,23 @@ export async function generateWithSeedream(
 ): Promise<ImageGenerationResult> {
   const baseUrl = config.baseUrl || DEFAULT_BASE_URL;
 
-  const response = await fetch(`${resolveArkRoot(baseUrl)}/images/generations`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${config.apiKey}`,
+  const response = await imageProviderFetch(
+    config,
+    `${resolveArkRoot(baseUrl)}/images/generations`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${config.apiKey}`,
+      },
+      body: JSON.stringify({
+        model: requireModel(config.model, 'Seedream'),
+        prompt: options.prompt,
+        size: resolveSeedreamSize(options),
+        watermark: false,
+      }),
     },
-    body: JSON.stringify({
-      model: requireModel(config.model, 'Seedream'),
-      prompt: options.prompt,
-      size: resolveSeedreamSize(options),
-      watermark: false,
-    }),
-  });
+  );
 
   if (!response.ok) {
     const text = await response.text();

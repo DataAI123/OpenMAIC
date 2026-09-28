@@ -30,22 +30,28 @@ export { extractObservedUrls, normalizeObservedUrl };
  * Register observed URLs for a session, returning the normalized set that was
  * considered (malformed and non-http(s) values are dropped). Pass a transaction
  * to commit the observations atomically with the business write that produced
- * them; a registration failure then aborts that write.
+ * them; a registration failure then aborts that write. `tenantId` selects the
+ * tenant-scoped store and is resolved server-side, never from request input.
  */
 export async function registerSessionUrls(
   sessionId: string,
   urls: string[],
   source: AgentSessionUrlSource = 'user',
   transaction?: AgentSessionTransaction,
+  tenantId?: string,
 ): Promise<string[]> {
-  const store = await getAgentSessionStore();
+  const store = await getAgentSessionStore(tenantId);
   return transaction === undefined
     ? store.registerSessionUrls(sessionId, urls, source)
     : store.registerSessionUrls(sessionId, urls, source, transaction);
 }
 
 /** Whether a future fetch of `url` is within a session-observed origin. */
-export async function isSessionUrlAllowed(sessionId: string, url: string): Promise<boolean> {
-  const store = await getAgentSessionStore();
+export async function isSessionUrlAllowed(
+  sessionId: string,
+  url: string,
+  tenantId?: string,
+): Promise<boolean> {
+  const store = await getAgentSessionStore(tenantId);
   return store.isSessionUrlAllowed(sessionId, url);
 }

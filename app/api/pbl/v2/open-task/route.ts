@@ -15,8 +15,14 @@
 import type { NextRequest } from 'next/server';
 
 import { createLogger } from '@/lib/logger';
-import { apiError } from '@/lib/server/api-response';
+import { apiError, type ApiErrorCode } from '@/lib/server/api-response';
 import { resolveModelFromRequest } from '@/lib/server/resolve-model';
+import { withRequestOwnerId } from '@/lib/server/agent-runtime/with-owner';
+import {
+  consumeActionRateLimit,
+  UserApiRateLimitExceededError,
+} from '@/lib/server/user-api-rate-limit';
+import { withOwnerResponseHeaders } from '@/lib/server/agent-runtime/route-response';
 
 import { createSSEResponse } from '@/lib/pbl/v2/api/sse';
 import { applyRequestLocaleToProject } from '@/lib/pbl/v2/api/locale';
@@ -38,56 +44,77 @@ interface OpenTaskRequest {
 }
 
 export async function POST(req: NextRequest) {
-  let body: OpenTaskRequest;
-  try {
-    body = (await req.json()) as OpenTaskRequest;
-  } catch {
-    return apiError('INVALID_REQUEST', 400, 'Request body must be valid JSON.');
-  }
-
-  if (!body?.project) {
-    return apiError('MISSING_REQUIRED_FIELD', 400, '`project` is required.');
-  }
-  if (body.phase !== 'greeting' && body.phase !== 'setup') {
-    return apiError('INVALID_REQUEST', 400, "`phase` must be 'greeting' or 'setup'.");
-  }
-
-  let resolved;
-  try {
-    resolved = await resolveModelFromRequest(req, body, 'pbl-v2-runtime:open-task');
-  } catch (err) {
-    log.error('Model resolution failed:', err);
-    return apiError('INVALID_REQUEST', 400, err instanceof Error ? err.message : String(err));
-  }
-
-  const { model, thinkingConfig } = resolved;
-  applyRequestLocaleToProject(req, body.project);
-
-  // Stage 2 (pre-play) recalibration: fold prior-quiz accuracy into
-  // the adaptive engine before the Instructor turn runs. Only fires
-  // on the GREETING (first entry into the project) — the SETUP
-  // phase already has the up-to-date assessment from the previous
-  // turn's dynamic signals.
-  if (body.phase === 'greeting' && body.priorQuizResults && body.priorQuizResults.length > 0) {
-    const { updated, tierChanged } = applyQuizSignalsToProject(body.project, body.priorQuizResults);
-    if (updated) {
-      log.info(
-        `Pre-play quiz recalibration: tier=${body.project.proficiency} ` +
-          `tierChanged=${tierChanged} ` +
-          `quizzes=${body.priorQuizResults.length}`,
-      );
+  return withRequestOwnerId(req, async (ownerId, responseHeaders) => {
+    const fail = (code: ApiErrorCode, status: number, error: string, details?: string) =>
+      withOwnerResponseHeaders(apiError(code, status, error, details), responseHeaders);
+    try {
+      await consumeActionRateLimit(ownerId, 'pbl_v2_open_task');
+    } catch (error) {
+      if (error instanceof UserApiRateLimitExceededError) {
+        responseHeaders.set('Retry-After', String(error.retryAfterSeconds));
+        return fail('RATE_LIMITED', 429, 'Too many task-open requests');
+      }
+      return fail('INTERNAL_ERROR', 503, 'Rate limiting is unavailable');
     }
-  }
+    const sse = (...args: Parameters<typeof createSSEResponse>) => {
+      const response = createSSEResponse(...args);
+      for (const [key, value] of responseHeaders) response.headers.append(key, value);
+      return response;
+    };
+    let body: OpenTaskRequest;
+    try {
+      body = (await req.json()) as OpenTaskRequest;
+    } catch {
+      return fail('INVALID_REQUEST', 400, 'Request body must be valid JSON.');
+    }
 
-  return createSSEResponse(
-    runInstructorTurn({
-      project: body.project,
-      userMessage: '',
-      phase: body.phase,
-      languageModel: model,
-      thinkingConfig,
-      signal: req.signal,
-    }),
-    { signal: req.signal },
-  );
+    if (!body?.project) {
+      return fail('MISSING_REQUIRED_FIELD', 400, '`project` is required.');
+    }
+    if (body.phase !== 'greeting' && body.phase !== 'setup') {
+      return fail('INVALID_REQUEST', 400, "`phase` must be 'greeting' or 'setup'.");
+    }
+
+    let resolved;
+    try {
+      resolved = await resolveModelFromRequest(req, body, 'pbl-v2-runtime:open-task');
+    } catch (err) {
+      log.error('Model resolution failed:', err);
+      return fail('INVALID_REQUEST', 400, err instanceof Error ? err.message : String(err));
+    }
+
+    const { model, thinkingConfig } = resolved;
+    applyRequestLocaleToProject(req, body.project);
+
+    // Stage 2 (pre-play) recalibration: fold prior-quiz accuracy into
+    // the adaptive engine before the Instructor turn runs. Only fires
+    // on the GREETING (first entry into the project) — the SETUP
+    // phase already has the up-to-date assessment from the previous
+    // turn's dynamic signals.
+    if (body.phase === 'greeting' && body.priorQuizResults && body.priorQuizResults.length > 0) {
+      const { updated, tierChanged } = applyQuizSignalsToProject(
+        body.project,
+        body.priorQuizResults,
+      );
+      if (updated) {
+        log.info(
+          `Pre-play quiz recalibration: tier=${body.project.proficiency} ` +
+            `tierChanged=${tierChanged} ` +
+            `quizzes=${body.priorQuizResults.length}`,
+        );
+      }
+    }
+
+    return sse(
+      runInstructorTurn({
+        project: body.project,
+        userMessage: '',
+        phase: body.phase,
+        languageModel: model,
+        thinkingConfig,
+        signal: req.signal,
+      }),
+      { signal: req.signal },
+    );
+  });
 }

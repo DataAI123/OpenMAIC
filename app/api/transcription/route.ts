@@ -12,11 +12,18 @@ import type { ASRProviderId } from '@/lib/audio/types';
 import { createLogger } from '@/lib/logger';
 import { apiError, apiSuccess } from '@/lib/server/api-response';
 import { findUnsafeNetworkTargetError, validatePublicUrlForSSRF } from '@/lib/server/ssrf-guard';
+import { ownerApiError } from '@/lib/server/agent-runtime/route-response';
+import { withRequestOwnerId } from '@/lib/server/agent-runtime/with-owner';
+import {
+  consumeActionRateLimit,
+  UserApiRateLimitExceededError,
+} from '@/lib/server/user-api-rate-limit';
+import { resolveAuthConfig } from '@/lib/server/auth/config';
 const log = createLogger('Transcription');
 
 export const maxDuration = 60;
 
-export async function POST(req: NextRequest) {
+async function handlePost(req: NextRequest, oidcMode: boolean) {
   let resolvedProviderId: string | undefined;
   let resolvedModelId: string | undefined;
   try {
@@ -85,19 +92,64 @@ export async function POST(req: NextRequest) {
 
     return apiSuccess({ text: result.text });
   } catch (error) {
-    log.error(
-      `Transcription failed [provider=${resolvedProviderId ?? 'unknown'}, model=${resolvedModelId ?? 'default'}]:`,
-      error,
-    );
+    if (oidcMode) {
+      log.error('Transcription failed for an OIDC request');
+    } else {
+      log.error(
+        `Transcription failed [provider=${resolvedProviderId ?? 'unknown'}, model=${resolvedModelId ?? 'default'}]:`,
+        error,
+      );
+    }
     const blocked = findUnsafeNetworkTargetError(error);
     if (blocked) {
-      return apiError('INVALID_URL', 403, blocked.message);
+      return apiError(
+        'INVALID_URL',
+        403,
+        oidcMode ? 'The ASR provider URL is not allowed.' : blocked.message,
+      );
     }
     return apiError(
       'TRANSCRIPTION_FAILED',
       500,
-      'Transcription failed',
-      error instanceof Error ? error.message : 'Unknown error',
+      oidcMode ? 'Transcription failed. Please try again later.' : 'Transcription failed',
+      oidcMode ? undefined : error instanceof Error ? error.message : 'Unknown error',
     );
   }
+}
+
+export async function POST(req: NextRequest) {
+  let oidcMode: boolean;
+  try {
+    oidcMode = resolveAuthConfig().mode === 'oidc';
+  } catch {
+    return apiError('INTERNAL_ERROR', 503, 'Transcription is unavailable.');
+  }
+  if (!oidcMode) return handlePost(req, false);
+
+  return withRequestOwnerId(req, async (ownerId, responseHeaders) => {
+    responseHeaders.set('Cache-Control', 'private, no-store');
+    try {
+      await consumeActionRateLimit(ownerId, 'transcription');
+    } catch (error) {
+      if (error instanceof UserApiRateLimitExceededError) {
+        responseHeaders.set('Retry-After', String(error.retryAfterSeconds));
+        return ownerApiError(
+          'RATE_LIMITED',
+          429,
+          'Too many transcription requests',
+          responseHeaders,
+        );
+      }
+      return ownerApiError('INTERNAL_ERROR', 503, 'Rate limiting is unavailable', responseHeaders);
+    }
+    const response = await handlePost(req, true);
+    const headers = new Headers(response.headers);
+    responseHeaders.forEach((value, name) => headers.set(name, value));
+    headers.set('Cache-Control', 'private, no-store');
+    return new Response(response.body, {
+      status: response.status,
+      statusText: response.statusText,
+      headers,
+    });
+  });
 }

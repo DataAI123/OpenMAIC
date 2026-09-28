@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const aiMock = vi.hoisted(() => ({
   // `totalUsage` is optional here so a single-step case can omit it: multi-step
@@ -16,7 +16,26 @@ const aiMock = vi.hoisted(() => ({
 
 const usageMock = vi.hoisted(() => ({
   normalizeUsage: vi.fn((usage: unknown) => usage),
+  hasBillableTokens: vi.fn((usage: unknown) => {
+    if (!usage || typeof usage !== 'object') return false;
+    const row = usage as Record<string, unknown>;
+    return ['inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheCreationTokens'].some(
+      (key) => typeof row[key] === 'number' && row[key] > 0,
+    );
+  }),
   recordUsage: vi.fn(async () => undefined),
+}));
+
+const quotaMock = vi.hoisted(() => ({
+  ownerId: 'user:alice' as string | undefined,
+  renew: vi.fn(async () => undefined),
+  reserve: vi.fn(async (_ownerId: string, reservedTokens: number) => ({
+    id: `reservation-${reservedTokens}`,
+    ownerId: 'user:alice',
+    periodStart: '2026-09-01',
+    reservedTokens,
+  })),
+  settle: vi.fn(async () => undefined),
 }));
 
 vi.mock('ai', () => ({
@@ -26,20 +45,48 @@ vi.mock('ai', () => ({
 
 vi.mock('@/lib/usage/normalize', () => ({
   normalizeUsage: usageMock.normalizeUsage,
+  hasBillableTokens: usageMock.hasBillableTokens,
 }));
 
 vi.mock('@/lib/server/usage-storage', () => ({
   recordUsage: usageMock.recordUsage,
 }));
 
-import { callLLM } from '@/lib/ai/llm';
+vi.mock('@/lib/server/usage-attribution', () => ({
+  currentUsageAttribution: () =>
+    quotaMock.ownerId ? { ownerId: quotaMock.ownerId, tenantId: 'default' } : undefined,
+}));
+
+vi.mock('@/lib/server/personal-llm-quota', () => ({
+  renewPersonalLlmTokenReservation: quotaMock.renew,
+  reservePersonalLlmTokens: quotaMock.reserve,
+  settlePersonalLlmTokens: quotaMock.settle,
+}));
+
+import { callLLM, streamLLM } from '@/lib/ai/llm';
 
 describe('LLM thinking provider options', () => {
   beforeEach(() => {
-    aiMock.generateText.mockClear();
+    vi.stubEnv('OPENMAIC_AUTH_MODE', 'legacy');
+    quotaMock.ownerId = 'user:alice';
+    quotaMock.renew.mockClear();
+    aiMock.generateText.mockReset();
+    aiMock.generateText.mockImplementation(async (params: unknown) => ({ text: 'ok', params }));
+    aiMock.streamText.mockReset();
     usageMock.normalizeUsage.mockClear();
+    usageMock.hasBillableTokens.mockClear();
     usageMock.recordUsage.mockClear();
+    quotaMock.reserve.mockClear();
+    quotaMock.settle.mockClear();
+    quotaMock.reserve.mockImplementation(async (_ownerId, reservedTokens) => ({
+      id: `reservation-${reservedTokens}`,
+      ownerId: 'user:alice',
+      periodStart: '2026-09-01',
+      reservedTokens,
+    }));
   });
+
+  afterEach(() => vi.unstubAllEnvs());
 
   it('sends GPT-5.6 max reasoning effort through OpenAI provider options', async () => {
     await callLLM(
@@ -49,7 +96,7 @@ describe('LLM thinking provider options', () => {
           modelId: 'gpt-5.6',
         },
         prompt: 'hi',
-      } as Parameters<typeof callLLM>[0],
+      } as unknown as Parameters<typeof callLLM>[0],
       'test',
       undefined,
       { mode: 'enabled', effort: 'max' },
@@ -276,6 +323,238 @@ describe('LLM thinking provider options', () => {
         expect.objectContaining({ usage: { inputTokens: 3, outputTokens: 4 } }),
       );
     });
+  });
+
+  it('reserves each OIDC model step before the provider call and settles actual tokens', async () => {
+    vi.stubEnv('OPENMAIC_AUTH_MODE', 'oidc');
+    aiMock.generateText.mockImplementationOnce(async (params: unknown) => {
+      const callbacks = params as {
+        prepareStep: (event: unknown) => Promise<unknown>;
+        onStepFinish: (event: unknown) => Promise<void>;
+      };
+      await callbacks.prepareStep({
+        model: { provider: 'openai.responses', modelId: 'gpt-5.6' },
+      });
+      await callbacks.onStepFinish({ usage: { inputTokens: 12, outputTokens: 7 } });
+      return {
+        text: 'ok',
+        params,
+        totalUsage: { inputTokens: 12, outputTokens: 7 },
+      };
+    });
+
+    await callLLM(
+      {
+        model: { provider: 'openai.responses', modelId: 'gpt-5.6' },
+        prompt: 'hi',
+      } as Parameters<typeof callLLM>[0],
+      'quota-test',
+    );
+
+    expect(quotaMock.reserve).toHaveBeenCalledOnce();
+    expect(quotaMock.reserve).toHaveBeenCalledWith('user:alice', 1_050_000);
+    expect(quotaMock.settle).toHaveBeenCalledWith('reservation-1050000', 19);
+    await vi.waitFor(() => expect(usageMock.recordUsage).toHaveBeenCalledOnce());
+  });
+
+  it('requires a server-resolved OIDC owner before invoking the provider', async () => {
+    vi.stubEnv('OPENMAIC_AUTH_MODE', 'oidc');
+    quotaMock.ownerId = undefined;
+
+    await expect(
+      callLLM(
+        {
+          model: { provider: 'openai.responses', modelId: 'gpt-5.6' },
+          prompt: 'hi',
+        } as Parameters<typeof callLLM>[0],
+        'quota-test',
+      ),
+    ).rejects.toThrow('PERSONAL_LLM_QUOTA_REQUIRES_AUTHENTICATED_USER');
+
+    expect(aiMock.generateText).not.toHaveBeenCalled();
+    expect(quotaMock.reserve).not.toHaveBeenCalled();
+  });
+
+  it('does not retry or reach the provider after monthly quota admission is denied', async () => {
+    vi.stubEnv('OPENMAIC_AUTH_MODE', 'oidc');
+    quotaMock.reserve.mockRejectedValueOnce(new Error('PERSONAL_LLM_MONTHLY_QUOTA_EXCEEDED'));
+    let providerStarted = false;
+    aiMock.generateText.mockImplementationOnce(async (params: unknown) => {
+      const callbacks = params as { prepareStep: (event: unknown) => Promise<unknown> };
+      await callbacks.prepareStep({
+        model: { provider: 'openai.responses', modelId: 'gpt-5.6' },
+      });
+      providerStarted = true;
+      return { text: 'must not run', params };
+    });
+
+    await expect(
+      callLLM(
+        {
+          model: { provider: 'openai.responses', modelId: 'gpt-5.6' },
+          prompt: 'hi',
+        } as Parameters<typeof callLLM>[0],
+        'quota-denied-test',
+        { retries: 2 },
+      ),
+    ).rejects.toThrow('PERSONAL_LLM_MONTHLY_QUOTA_EXCEEDED');
+
+    expect(providerStarted).toBe(false);
+    expect(aiMock.generateText).toHaveBeenCalledOnce();
+    expect(quotaMock.reserve).toHaveBeenCalledOnce();
+  });
+
+  it('uses a separate context reservation for every tool-loop model step', async () => {
+    vi.stubEnv('OPENMAIC_AUTH_MODE', 'oidc');
+    let reservationNumber = 0;
+    quotaMock.reserve.mockImplementation(async (_ownerId, reservedTokens) => {
+      reservationNumber += 1;
+      return {
+        id: `step-${reservationNumber}`,
+        ownerId: 'user:alice',
+        periodStart: '2026-09-01',
+        reservedTokens,
+      };
+    });
+    aiMock.generateText.mockImplementationOnce(async (params: unknown) => {
+      const callbacks = params as {
+        prepareStep: (event: unknown) => Promise<unknown>;
+        onStepFinish: (event: unknown) => Promise<void>;
+      };
+      for (const tokens of [5, 11]) {
+        await callbacks.prepareStep({
+          model: { provider: 'openai.responses', modelId: 'gpt-5.6' },
+        });
+        await callbacks.onStepFinish({
+          usage: { inputTokens: tokens - 2, outputTokens: 2 },
+        });
+      }
+      return { text: 'ok', params, totalUsage: { inputTokens: 12, outputTokens: 4 } };
+    });
+
+    await callLLM(
+      {
+        model: { provider: 'openai.responses', modelId: 'gpt-5.6' },
+        prompt: 'hi',
+        tools: { next: {} },
+      } as unknown as Parameters<typeof callLLM>[0],
+      'quota-loop-test',
+    );
+
+    expect(quotaMock.reserve).toHaveBeenCalledTimes(2);
+    expect(quotaMock.settle).toHaveBeenNthCalledWith(1, 'step-1', 5);
+    expect(quotaMock.settle).toHaveBeenNthCalledWith(2, 'step-2', 11);
+  });
+
+  it('charges the reserved context ceiling when a successful step omits usage', async () => {
+    vi.stubEnv('OPENMAIC_AUTH_MODE', 'oidc');
+    aiMock.generateText.mockImplementationOnce(async (params: unknown) => {
+      const callbacks = params as {
+        prepareStep: (event: unknown) => Promise<unknown>;
+        onStepFinish: (event: unknown) => Promise<void>;
+      };
+      await callbacks.prepareStep({
+        model: { provider: 'openai.responses', modelId: 'gpt-5.6' },
+      });
+      await callbacks.onStepFinish({ usage: { inputTokens: 0, outputTokens: 0 } });
+      return { text: 'ok', params, totalUsage: { inputTokens: 0, outputTokens: 0 } };
+    });
+
+    await callLLM(
+      {
+        model: { provider: 'openai.responses', modelId: 'gpt-5.6' },
+        prompt: 'hi',
+      } as Parameters<typeof callLLM>[0],
+      'quota-unmeasured-test',
+    );
+
+    expect(quotaMock.settle).toHaveBeenCalledWith('reservation-1050000', 1_050_000);
+    await vi.waitFor(() =>
+      expect(usageMock.recordUsage).toHaveBeenCalledWith(
+        expect.objectContaining({ quotaEstimatedTokens: 1_050_000 }),
+      ),
+    );
+  });
+
+  it('settles the reserved ceiling and records an estimate when a provider call fails', async () => {
+    vi.stubEnv('OPENMAIC_AUTH_MODE', 'oidc');
+    aiMock.generateText.mockImplementationOnce(async (params: unknown) => {
+      const callbacks = params as { prepareStep: (event: unknown) => Promise<unknown> };
+      await callbacks.prepareStep({
+        model: { provider: 'openai.responses', modelId: 'gpt-5.6' },
+      });
+      throw new Error('provider unavailable');
+    });
+
+    await expect(
+      callLLM(
+        {
+          model: { provider: 'openai.responses', modelId: 'gpt-5.6' },
+          prompt: 'hi',
+        } as Parameters<typeof callLLM>[0],
+        'quota-provider-error-test',
+      ),
+    ).rejects.toThrow('provider unavailable');
+
+    expect(quotaMock.settle).toHaveBeenCalledWith('reservation-1050000', 1_050_000);
+    await vi.waitFor(() =>
+      expect(usageMock.recordUsage).toHaveBeenCalledWith(
+        expect.objectContaining({ quotaEstimatedTokens: 1_050_000 }),
+      ),
+    );
+  });
+
+  it('fails closed for OIDC models without a catalog context ceiling', async () => {
+    vi.stubEnv('OPENMAIC_AUTH_MODE', 'oidc');
+    aiMock.generateText.mockImplementationOnce(async (params: unknown) => {
+      const callbacks = params as { prepareStep: (event: unknown) => Promise<unknown> };
+      await callbacks.prepareStep({
+        model: { provider: 'custom-openai', modelId: 'unlisted-model' },
+      });
+      return { text: 'must not reach provider', params };
+    });
+
+    await expect(
+      callLLM(
+        {
+          model: { provider: 'custom-openai', modelId: 'unlisted-model' },
+          prompt: 'hi',
+        } as Parameters<typeof callLLM>[0],
+        'quota-test',
+      ),
+    ).rejects.toThrow('PERSONAL_LLM_QUOTA_MODEL_CONTEXT_UNKNOWN');
+    expect(quotaMock.reserve).not.toHaveBeenCalled();
+  });
+
+  it('reserves and settles streaming model steps and disables invisible SDK retries', async () => {
+    vi.stubEnv('OPENMAIC_AUTH_MODE', 'oidc');
+    const streamResult = { textStream: 'stream' };
+    aiMock.streamText.mockReturnValueOnce(streamResult);
+
+    const result = streamLLM(
+      {
+        model: { provider: 'openai.responses', modelId: 'gpt-5.6' },
+        prompt: 'hi',
+      } as Parameters<typeof streamLLM>[0],
+      'quota-stream-test',
+    );
+    const wrapped = aiMock.streamText.mock.calls[0]?.[0] as {
+      maxRetries: number;
+      prepareStep: (event: unknown) => Promise<unknown>;
+      onStepFinish: (event: unknown) => Promise<void>;
+      onFinish: (event: unknown) => Promise<void>;
+    };
+
+    await wrapped.prepareStep({
+      model: { provider: 'openai.responses', modelId: 'gpt-5.6' },
+    });
+    await wrapped.onStepFinish({ usage: { inputTokens: 9, outputTokens: 4 } });
+    await wrapped.onFinish({ totalUsage: { inputTokens: 9, outputTokens: 4 } });
+
+    expect(result).toBe(streamResult);
+    expect(wrapped.maxRetries).toBe(0);
+    expect(quotaMock.reserve).toHaveBeenCalledWith('user:alice', 1_050_000);
+    expect(quotaMock.settle).toHaveBeenCalledWith('reservation-1050000', 13);
   });
 
   it('sends Claude Haiku 4.5 thinking budget without effort', async () => {

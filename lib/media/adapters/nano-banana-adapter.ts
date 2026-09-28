@@ -20,6 +20,7 @@ import type {
   ImageGenerationResult,
 } from '../types';
 import { requireModel } from '../require-model';
+import { imageProviderFetch } from '../provider-fetch';
 
 const DEFAULT_MODEL = 'gemini-2.5-flash-image';
 const DEFAULT_BASE_URL = 'https://generativelanguage.googleapis.com';
@@ -106,23 +107,27 @@ export async function generateWithNanoBanana(
   const baseUrl = config.baseUrl || DEFAULT_BASE_URL;
   const model = requireModel(config.model, 'Nano Banana');
 
-  const response = await fetch(`${baseUrl}/v1beta/models/${model}:generateContent`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-goog-api-key': config.apiKey,
-    },
-    body: JSON.stringify({
-      contents: [
-        {
-          parts: [{ text: options.prompt }],
-        },
-      ],
-      generationConfig: {
-        responseModalities: ['IMAGE'],
+  const response = await imageProviderFetch(
+    config,
+    `${baseUrl}/v1beta/models/${model}:generateContent`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-goog-api-key': config.apiKey,
       },
-    }),
-  });
+      body: JSON.stringify({
+        contents: [
+          {
+            parts: [{ text: options.prompt }],
+          },
+        ],
+        generationConfig: {
+          responseModalities: ['IMAGE'],
+        },
+      }),
+    },
+  );
 
   if (!response.ok) {
     const text = await response.text();

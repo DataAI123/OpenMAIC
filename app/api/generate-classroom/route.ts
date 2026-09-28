@@ -4,6 +4,12 @@ import { apiError, apiSuccess } from '@/lib/server/api-response';
 import { type GenerateClassroomInput } from '@/lib/server/classroom-generation';
 import { runClassroomGenerationJob } from '@/lib/server/classroom-job-runner';
 import { createClassroomGenerationJob } from '@/lib/server/classroom-job-store';
+import type { RequestOwnerIdentity } from '@/lib/server/agent-runtime/with-owner';
+import { withRequestOwnerId } from '@/lib/server/agent-runtime/with-owner';
+import {
+  consumeActionRateLimit,
+  UserApiRateLimitExceededError,
+} from '@/lib/server/user-api-rate-limit';
 import { buildRequestOrigin } from '@/lib/server/classroom-storage';
 import { createLogger } from '@/lib/logger';
 
@@ -26,7 +32,7 @@ function isValidPdfContent(value: unknown): value is PdfContent {
   );
 }
 
-export async function POST(req: NextRequest) {
+async function handlePost(req: NextRequest, identity: RequestOwnerIdentity) {
   let requirementSnippet: string | undefined;
   try {
     const rawBody = (await req.json()) as Partial<GenerateClassroomInput>;
@@ -67,10 +73,10 @@ export async function POST(req: NextRequest) {
 
     const baseUrl = buildRequestOrigin(req);
     const jobId = nanoid(10);
-    const job = await createClassroomGenerationJob(jobId, body);
+    const job = await createClassroomGenerationJob(jobId, body, identity);
     const pollUrl = `${baseUrl}/api/generate-classroom/${jobId}`;
 
-    after(() => runClassroomGenerationJob(jobId, body, baseUrl));
+    after(() => runClassroomGenerationJob(jobId, body, baseUrl, identity));
 
     return apiSuccess(
       {
@@ -95,4 +101,26 @@ export async function POST(req: NextRequest) {
       error instanceof Error ? error.message : 'Unknown error',
     );
   }
+}
+
+export async function POST(req: NextRequest) {
+  return withRequestOwnerId(req, async (ownerId, responseHeaders, identity) => {
+    const fail = (code: 'RATE_LIMITED' | 'INTERNAL_ERROR', status: number, message: string) => {
+      const response = apiError(code, status, message);
+      responseHeaders.forEach((value, name) => response.headers.append(name, value));
+      return response;
+    };
+    try {
+      await consumeActionRateLimit(ownerId, 'generate_classroom');
+    } catch (error) {
+      if (error instanceof UserApiRateLimitExceededError) {
+        responseHeaders.set('Retry-After', String(error.retryAfterSeconds));
+        return fail('RATE_LIMITED', 429, 'Too many classroom generation requests');
+      }
+      return fail('INTERNAL_ERROR', 503, 'Rate limiting is unavailable');
+    }
+    const response = await handlePost(req, identity ?? { ownerId });
+    responseHeaders.forEach((value, name) => response.headers.append(name, value));
+    return response;
+  });
 }

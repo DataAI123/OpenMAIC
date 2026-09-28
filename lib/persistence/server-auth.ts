@@ -1,19 +1,19 @@
 /**
- * DEVELOPMENT-ONLY authentication for the embedded persistence route.
+ * Legacy DEVELOPMENT-ONLY authentication for the embedded persistence route.
  *
  * The token is NOT a secret: NEXT_PUBLIC_PERSISTENCE_TOKEN is compiled into
  * the public browser bundle, so it is fully visible to every visitor and
  * provides no confidentiality and no user isolation.
  *
- * This authenticator is only consulted for `/runtime/*`. Document and asset
- * requests skip it and take their principal from the 30-day anonymous owner
- * cookie. Document reads are capability-by-id (stage id, no owner check);
- * writes and deletes compare that cookie-derived owner. `x-learner-key` is a
- * client-supplied runtime partition key, not a document-access token.
+ * In legacy mode this authenticator is consulted for `/runtime/*`. The OIDC
+ * path derives runtime and document principals from the verified application
+ * session and does not use this public development token. Assets remain on a
+ * shared legacy principal and are closed in OIDC mode until ownership is
+ * implemented. `x-learner-key` is never an identity credential.
  *
  * Suitable only for localhost or trusted-network, single-user deployments.
- * Production must replace this module with real session verification and
- * derive learner identity from server-controlled claims.
+ * Production legacy deployments must not enable this authenticator. OIDC
+ * requests are handled by the persistence route's application-session path.
  */
 import { createHash, timingSafeEqual } from 'node:crypto';
 import type { IncomingMessage } from 'node:http';
@@ -28,14 +28,12 @@ const log = createLogger('PersistenceAuth');
 type PersistencePrincipal = RuntimeHttpPrincipal & Partial<Pick<AssetPrincipal, 'key'>>;
 
 /**
- * The single asset partition for this deployment shape. Documents have no
- * ownership partition; assets get the same treatment until real auth lands.
+ * The shared asset partition used by legacy deployments. OIDC asset requests
+ * use a per-user principal and public-reference checks in the persistence
+ * route instead.
  *
- * Exported because the persistence route resolves the asset principal itself,
- * server-side, rather than through this module's client-supplied credentials:
- * assets are one shared partition by design, so there is nothing per-caller for
- * the development authenticator to decide, and routing them through it made
- * every asset request fail in a production build that had not opted into it.
+ * Exported because the persistence route resolves the legacy asset principal
+ * server-side rather than through client-supplied credentials.
  */
 export const SHARED_ASSET_PRINCIPAL = 'shared';
 
@@ -89,14 +87,13 @@ function authenticatePersistenceCredentials(
   const token = process.env.PERSISTENCE_DEV_TOKEN;
   if (!token || !authorization || !secureEqual(authorization, `Bearer ${token}`)) return undefined;
 
-  // Documents are stored without any ownership partition, so assets are
-  // stored under one shared principal to match: this authenticator provides
-  // no user isolation either way (the header is client-supplied), and a
-  // per-header asset partition only meant a converted document's assets
+  // Legacy documents are stored without an ownership partition, so legacy
+  // assets share one principal as well. OIDC deployments bypass this
+  // development authenticator and use the internal user id.
+  // A per-header asset partition only meant a converted document's assets
   // became unreadable to every other browser the document was shared with.
   // The learner key still partitions runtime sessions, which are genuinely
-  // per-learner state. Production replaces this module with real session
-  // verification and derives both from server-controlled claims.
+  // per-learner state.
   return { key: SHARED_ASSET_PRINCIPAL, ...(learnerKey ? { learnerKey } : {}) };
 }
 

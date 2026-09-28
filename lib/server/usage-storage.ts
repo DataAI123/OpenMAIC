@@ -2,6 +2,7 @@ import { promises as fs } from 'fs';
 import path from 'path';
 import { createLogger } from '@/lib/logger';
 import { hasBillableTokens, type NormalizedUsage } from '@/lib/usage/normalize';
+import { currentUsageAttribution } from '@/lib/server/usage-attribution';
 
 const log = createLogger('UsageStorage');
 
@@ -32,6 +33,8 @@ export interface UsageRecordInput {
   modelString: string;
   /** Token usage (LLM only). */
   usage?: NormalizedUsage;
+  /** Conservatively charged quota estimate when provider usage is unavailable. */
+  quotaEstimatedTokens?: number;
   /** Non-token quantity: images count / seconds / characters. */
   quantity?: number;
   /** Unit for `quantity`. */
@@ -53,9 +56,20 @@ export interface UsageRecord {
   cacheReadTokens: number;
   cacheCreationTokens: number;
   reasoningTokens: number;
+  /** Estimated quota charge, kept separate from provider-reported token fields. */
+  quotaEstimatedTokens?: number;
   // Non-token usage (e.g. image count, video seconds, TTS characters).
   quantity?: number;
   unit?: UsageUnit;
+  /**
+   * Server-derived attribution (added in the enterprise refactor). Present only
+   * when the write happened inside an authenticated request/runner scope. These
+   * fields must never be sourced from client input; they are read from the
+   * ambient {@link currentUsageAttribution} at record time. Absent on legacy
+   * unattributed rows and on rows written outside any principal scope.
+   */
+  ownerId?: string;
+  tenantId?: string;
 }
 
 interface RecordOptions {
@@ -104,12 +118,20 @@ export async function recordUsage(
     const usage = input.usage ?? ZERO_USAGE;
 
     if (kind === 'llm') {
-      if (!hasBillableTokens(usage)) return;
+      if (
+        !hasBillableTokens(usage) &&
+        !(input.quotaEstimatedTokens && input.quotaEstimatedTokens > 0)
+      )
+        return;
     } else if (!input.quantity || input.quantity <= 0) {
       return;
     }
 
     const now = opts.now ?? new Date();
+    // Read attribution synchronously from the ambient principal scope before
+    // any await, so the value cannot be swapped by a later task. Absent outside
+    // an authenticated request/run — those stay deployment-wide as before.
+    const attribution = currentUsageAttribution();
     const record: UsageRecord = {
       id: makeId(now),
       createdAt: now.getTime(),
@@ -123,8 +145,17 @@ export async function recordUsage(
       cacheReadTokens: usage.cacheReadTokens,
       cacheCreationTokens: usage.cacheCreationTokens,
       reasoningTokens: usage.reasoningTokens,
+      ...(input.quotaEstimatedTokens != null
+        ? { quotaEstimatedTokens: input.quotaEstimatedTokens }
+        : {}),
       ...(input.quantity != null ? { quantity: input.quantity } : {}),
       ...(input.unit ? { unit: input.unit } : {}),
+      ...(attribution
+        ? {
+            ownerId: attribution.ownerId,
+            ...(attribution.tenantId ? { tenantId: attribution.tenantId } : {}),
+          }
+        : {}),
     };
 
     const dir = usageDir(opts.baseDir);
@@ -168,6 +199,8 @@ interface ReadOptions {
   baseDir?: string;
   /** Limit to specific YYYY-MM month files; defaults to all files in the dir. */
   months?: string[];
+  /** Return only rows attributed to this server-resolved owner. */
+  ownerId?: string;
 }
 
 /**
@@ -201,6 +234,7 @@ export async function readUsageRecords(opts: ReadOptions = {}): Promise<UsageRec
       try {
         const row = JSON.parse(trimmed) as UsageRecord;
         if (!row.kind) row.kind = 'llm'; // backward-compat
+        if (opts.ownerId !== undefined && row.ownerId !== opts.ownerId) continue;
         records.push(row);
       } catch {
         // skip malformed line

@@ -28,7 +28,15 @@ import type {
 } from '../types';
 import { runPolledTask, type PollResult } from '../polled-task';
 import { requireModel } from '../require-model';
-import { openRouterBaseUrl, openRouterHeaders } from './openrouter-image-adapter';
+import { videoProviderFetch } from '../provider-fetch';
+import type { ProviderKeyProbe } from '../provider-key-probe';
+import {
+  isCanonicalOpenRouterBaseUrl,
+  openRouterBaseUrl,
+  openRouterHeaders,
+  probeOpenRouterKey,
+  type OpenRouterKeyProbeCopy,
+} from './openrouter-image-adapter';
 
 const POLL_INTERVAL_MS = 10_000; // 10 seconds
 const MAX_POLL_ATTEMPTS = 60; // 10 minutes max
@@ -65,14 +73,22 @@ async function fetchVideoDataUrl(
   baseUrl: string,
   apiKey: string,
   jobId: string,
+  pinSsrf: boolean,
   signal?: AbortSignal,
 ): Promise<string> {
-  const response = await fetch(`${baseUrl}/videos/${encodeURIComponent(jobId)}/content?index=0`, {
-    method: 'GET',
-    headers: { Authorization: `Bearer ${apiKey}` },
-    redirect: 'manual',
-    ...(signal ? { signal } : {}),
-  });
+  const response = await videoProviderFetch(
+    { pinSsrfConnections: pinSsrf },
+    `${baseUrl}/videos/${encodeURIComponent(jobId)}/content?index=0`,
+    {
+      method: 'GET',
+      headers: { Authorization: `Bearer ${apiKey}` },
+      redirect: 'manual',
+      ...(signal ? { signal } : {}),
+    },
+    // The adapter never wants a redirect followed here (it would carry the
+    // Authorization header off-origin), matching its `redirect: 'manual'`.
+    { rejectRedirects: true },
+  );
   if (!response.ok) {
     const text = await response.text().catch(() => '');
     throw new Error(`OpenRouter video download failed (${response.status}): ${text}`);
@@ -88,11 +104,12 @@ async function resolveJob(
   baseUrl: string,
   apiKey: string,
   options: VideoGenerationOptions,
+  pinSsrf: boolean,
 ): Promise<PollResult<VideoGenerationResult>> {
   switch (job.status) {
     case 'completed': {
       if (!job.id) throw new Error('OpenRouter returned a completed job without an id');
-      const url = await fetchVideoDataUrl(baseUrl, apiKey, job.id, options.signal);
+      const url = await fetchVideoDataUrl(baseUrl, apiKey, job.id, pinSsrf, options.signal);
       const { width, height } = getDimensions(options.aspectRatio);
       return {
         status: 'done',
@@ -116,19 +133,25 @@ async function submitVideoJob(
   apiKey: string,
   model: string,
   options: VideoGenerationOptions,
+  pinSsrf: boolean,
 ): Promise<OpenRouterVideoJob> {
   const body: Record<string, unknown> = { model, prompt: options.prompt };
   if (options.aspectRatio) body.aspect_ratio = options.aspectRatio;
   if (options.duration) body.duration = options.duration;
   if (options.resolution) body.resolution = options.resolution;
 
-  const response = await fetch(`${baseUrl}/videos`, {
-    method: 'POST',
-    headers: openRouterHeaders(apiKey),
-    redirect: 'manual',
-    body: JSON.stringify(body),
-    ...(options.signal ? { signal: options.signal } : {}),
-  });
+  const response = await videoProviderFetch(
+    { pinSsrfConnections: pinSsrf },
+    `${baseUrl}/videos`,
+    {
+      method: 'POST',
+      headers: openRouterHeaders(apiKey),
+      redirect: 'manual',
+      body: JSON.stringify(body),
+      ...(options.signal ? { signal: options.signal } : {}),
+    },
+    { rejectRedirects: true },
+  );
 
   if (!response.ok) {
     const text = await response.text();
@@ -141,14 +164,20 @@ async function pollVideoJob(
   baseUrl: string,
   apiKey: string,
   jobId: string,
+  pinSsrf: boolean,
   signal?: AbortSignal,
 ): Promise<OpenRouterVideoJob> {
-  const response = await fetch(`${baseUrl}/videos/${encodeURIComponent(jobId)}`, {
-    method: 'GET',
-    headers: openRouterHeaders(apiKey),
-    redirect: 'manual',
-    ...(signal ? { signal } : {}),
-  });
+  const response = await videoProviderFetch(
+    { pinSsrfConnections: pinSsrf },
+    `${baseUrl}/videos/${encodeURIComponent(jobId)}`,
+    {
+      method: 'GET',
+      headers: openRouterHeaders(apiKey),
+      redirect: 'manual',
+      ...(signal ? { signal } : {}),
+    },
+    { rejectRedirects: true },
+  );
   if (!response.ok) {
     const text = await response.text();
     throw new Error(`OpenRouter video poll failed (${response.status}): ${text}`);
@@ -209,19 +238,20 @@ export async function generateWithOpenRouterVideo(
 ): Promise<VideoGenerationResult> {
   const baseUrl = openRouterBaseUrl(config.baseUrl);
   const model = requireModel(config.model, 'OpenRouter Video');
+  const pinSsrf = config.pinSsrfConnections === true;
 
   return runPolledTask<VideoGenerationResult>({
     submit: async () => {
-      const job = await submitVideoJob(baseUrl, config.apiKey, model, options);
+      const job = await submitVideoJob(baseUrl, config.apiKey, model, options, pinSsrf);
       if (!job.id) throw new Error('OpenRouter returned a video job without an id');
       // A job can already be terminal on submit; only 'pending'/'in_progress' waits.
-      const resolved = await resolveJob(job, baseUrl, config.apiKey, options);
+      const resolved = await resolveJob(job, baseUrl, config.apiKey, options, pinSsrf);
       return resolved.status === 'pending' ? { status: 'submitted', taskId: job.id } : resolved;
     },
     poll: async (jobId) => {
-      const job = await pollVideoJob(baseUrl, config.apiKey, jobId, options.signal);
+      const job = await pollVideoJob(baseUrl, config.apiKey, jobId, pinSsrf, options.signal);
       // Poll responses may omit the id; keep the one we submitted with.
-      return resolveJob({ ...job, id: job.id || jobId }, baseUrl, config.apiKey, options);
+      return resolveJob({ ...job, id: job.id || jobId }, baseUrl, config.apiKey, options, pinSsrf);
     },
     intervalMs: POLL_INTERVAL_MS,
     maxAttempts: MAX_POLL_ATTEMPTS,
@@ -231,3 +261,21 @@ export async function generateWithOpenRouterVideo(
     ...(options.signal ? { signal: options.signal } : {}),
   });
 }
+
+const VIDEO_KEY_PROBE_COPY: OpenRouterKeyProbeCopy = {
+  connected: 'Connected to OpenRouter Video',
+  invalidKey: 'OpenRouter API key is invalid',
+  failed: 'OpenRouter video verification failed',
+};
+
+/**
+ * The key probe the video capability route resolves for this provider. Shares
+ * the endpoint and request shape with the image probe — one key covers both —
+ * and differs only in the copy the operator reads.
+ */
+export const OPENROUTER_VIDEO_KEY_PROBE: ProviderKeyProbe = {
+  missingKeyMessage: 'An OpenRouter API key is required',
+  rejectedBaseUrlMessage: 'OpenRouter base URL is not allowed',
+  isBaseUrlAllowed: isCanonicalOpenRouterBaseUrl,
+  probe: (input) => probeOpenRouterKey(input, VIDEO_KEY_PROBE_COPY),
+};

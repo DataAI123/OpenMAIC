@@ -6,6 +6,7 @@ const queryDocParserStatus = vi.fn();
 vi.mock('@alicloud/docmind-api20220711', () => {
   class Client {
     queryDocParserStatus = queryDocParserStatus;
+    setGatewayClient = vi.fn();
   }
   return {
     default: Client,
@@ -14,11 +15,15 @@ vi.mock('@alicloud/docmind-api20220711', () => {
     },
   };
 });
-vi.mock('@alicloud/openapi-client', () => ({
-  Config: class {
-    constructor(public args: unknown) {}
+vi.mock('@alicloud/openapi-core', () => ({
+  $OpenApiUtil: {
+    Config: class {
+      constructor(public args: unknown) {}
+    },
   },
+  OpenApiUtil: { getUserAgent: () => 'test-agent' },
 }));
+vi.mock('@alicloud/gateway-pop', () => ({ default: class GatewayPop {} }));
 vi.mock('@alicloud/tea-util', () => ({
   RuntimeOptions: class {
     constructor(public args: unknown) {}

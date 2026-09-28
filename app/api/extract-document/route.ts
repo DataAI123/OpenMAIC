@@ -25,6 +25,13 @@ import {
 import { apiError, apiSuccess } from '@/lib/server/api-response';
 import { validateUrlForSSRF } from '@/lib/server/ssrf-guard';
 import { MAX_EXTRACT_DOCUMENT_FILE_SIZE_BYTES } from '@/lib/constants/generation';
+import { resolveAuthConfig } from '@/lib/server/auth/config';
+import { withRequestOwnerId } from '@/lib/server/agent-runtime/with-owner';
+import { ownerApiError } from '@/lib/server/agent-runtime/route-response';
+import {
+  consumeActionRateLimit,
+  UserApiRateLimitExceededError,
+} from '@/lib/server/user-api-rate-limit';
 
 // The asset-id path resolves bytes from the server asset store, which lives in
 // the PostgreSQL persistence backend; it needs the Node runtime, not the edge.
@@ -437,7 +444,7 @@ async function runExtraction(
   return apiSuccess({ data: resultWithMetadata });
 }
 
-export async function POST(req: NextRequest) {
+async function handlePost(req: NextRequest, authenticatedOwnerId?: string) {
   const logState: ExtractLogState = {};
   // Whether this request took the asset-id (JSON) form. The multipart byte
   // form's observable behavior is frozen; a few JSON-path-only responses use
@@ -530,11 +537,19 @@ export async function POST(req: NextRequest) {
 
       let resolution: ServerAssetResolution;
       try {
-        resolution = await resolveServerAsset(
-          body.assetId,
-          req.headers,
-          MAX_EXTRACT_DOCUMENT_FILE_SIZE_BYTES,
-        );
+        resolution =
+          authenticatedOwnerId === undefined
+            ? await resolveServerAsset(
+                body.assetId,
+                req.headers,
+                MAX_EXTRACT_DOCUMENT_FILE_SIZE_BYTES,
+              )
+            : await resolveServerAsset(
+                body.assetId,
+                req.headers,
+                MAX_EXTRACT_DOCUMENT_FILE_SIZE_BYTES,
+                authenticatedOwnerId,
+              );
       } catch (error) {
         // A failure from the server asset store (DB outage, registry failure)
         // must not reach the client as raw `error.message`; log the real error
@@ -651,6 +666,47 @@ export async function POST(req: NextRequest) {
     }
     return apiError('PARSE_FAILED', 500, error instanceof Error ? error.message : 'Unknown error');
   }
+}
+
+export async function POST(req: NextRequest) {
+  let oidcMode: boolean;
+  try {
+    oidcMode = resolveAuthConfig().mode === 'oidc';
+  } catch {
+    return apiError('INTERNAL_ERROR', 503, 'Document extraction is unavailable.');
+  }
+  if (!oidcMode) return handlePost(req);
+
+  return withRequestOwnerId(req, async (ownerId, responseHeaders) => {
+    try {
+      await consumeActionRateLimit(ownerId, 'extract_document');
+    } catch (error) {
+      if (error instanceof UserApiRateLimitExceededError) {
+        responseHeaders.set('Retry-After', String(error.retryAfterSeconds));
+        return ownerApiError(
+          'RATE_LIMITED',
+          429,
+          'Too many extraction requests',
+          responseHeaders,
+        );
+      }
+      return ownerApiError(
+        'INTERNAL_ERROR',
+        503,
+        'Rate limiting is unavailable',
+        responseHeaders,
+      );
+    }
+    const response = await handlePost(req, ownerId);
+    const headers = new Headers(response.headers);
+    responseHeaders.forEach((value, name) => headers.set(name, value));
+    headers.set('Cache-Control', 'private, no-store');
+    return new Response(response.body, {
+      status: response.status,
+      statusText: response.statusText,
+      headers,
+    });
+  });
 }
 
 /** Strip line-breaking control characters from caller-controlled log values. */

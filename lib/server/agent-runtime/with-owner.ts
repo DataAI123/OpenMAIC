@@ -1,24 +1,155 @@
 import { resolveRequestOwnerId } from './owner';
+import { resolveAuthConfig, type OpenMaicAuthConfig } from '@/lib/server/auth/config';
+import { hasPermission } from '@/lib/server/auth/permissions';
+import { clearedSessionCookieHeader, resolveApplicationSession } from '@/lib/server/auth/session';
+import {
+  attributionForOwner,
+  runWithUsageAttribution,
+  type UsageAttribution,
+} from '@/lib/server/usage-attribution';
+
+export type RequestOwnerResolution =
+  | { ownerId: string; tenantId?: string; responseHeaders: Headers }
+  | { response: Response };
+
+export interface RequestOwnerIdentity {
+  ownerId: string;
+  tenantId?: string;
+}
+
+export interface RequestOwnerOptions {
+  /** Permit a handler's explicit, read-only public resource policy for guests. */
+  allowAnonymousPublicRead?: (req: Pick<Request, 'headers' | 'method' | 'url'>) => boolean;
+}
+
+/** Resolve an application identity in OIDC mode and preserve anonymous owners in legacy mode. */
+export async function resolveRequestOwnerIdForRequest(
+  req: Pick<Request, 'headers' | 'method' | 'url'>,
+  options?: RequestOwnerOptions,
+): Promise<RequestOwnerResolution> {
+  const responseHeaders = new Headers();
+  let config: OpenMaicAuthConfig;
+  try {
+    config = resolveAuthConfig();
+  } catch {
+    return {
+      response: Response.json(
+        { success: false, errorCode: 'AUTH_UNAVAILABLE' },
+        { status: 503, headers: { 'Cache-Control': 'no-store' } },
+      ),
+    };
+  }
+
+  if (config.mode === 'legacy') {
+    return { ownerId: resolveRequestOwnerId(req, responseHeaders), responseHeaders };
+  }
+
+  const session = await resolveApplicationSession(req.headers, config);
+  if (session.status === 'authenticated') {
+    const method = req.method.toUpperCase();
+    // Read-only verbs always pass; a mutating verb needs the write permission.
+    // The method gate is load-bearing — checking the permission alone would
+    // require every GET to hold `webapp.write` too.
+    if (
+      !['GET', 'HEAD', 'OPTIONS'].includes(method) &&
+      !hasPermission(session.session.role, 'webapp.write')
+    ) {
+      return {
+        response: Response.json(
+          { success: false, errorCode: 'FORBIDDEN' },
+          { status: 403, headers: { 'Cache-Control': 'no-store' } },
+        ),
+      };
+    }
+    if (!['GET', 'HEAD', 'OPTIONS'].includes(method)) {
+      if (req.headers.get('origin') !== config.appOrigin) {
+        return {
+          response: Response.json(
+            { success: false, errorCode: 'INVALID_ORIGIN' },
+            { status: 403, headers: { 'Cache-Control': 'no-store' } },
+          ),
+        };
+      }
+    }
+    return {
+      ownerId: `user:${session.session.userId}`,
+      tenantId: session.session.tenantId,
+      responseHeaders,
+    };
+  }
+  if (session.status === 'tenant-required') {
+    // Identity is established but no tenant is chosen, so no tenant-scoped
+    // resource can be addressed. 403 (not 401) keeps the client from looping
+    // through a login that cannot supply the missing tenant.
+    return {
+      response: Response.json(
+        { success: false, errorCode: 'TENANT_REQUIRED', error: 'tenant_required' },
+        { status: 403, headers: { 'Cache-Control': 'no-store' } },
+      ),
+    };
+  }
+  if (session.status === 'unavailable') {
+    return {
+      response: Response.json(
+        { success: false, errorCode: 'AUTH_UNAVAILABLE' },
+        { status: 503, headers: { 'Cache-Control': 'no-store' } },
+      ),
+    };
+  }
+
+  if (req.method.toUpperCase() === 'GET' && options?.allowAnonymousPublicRead?.(req)) {
+    if (session.status === 'invalid') {
+      responseHeaders.append('Set-Cookie', clearedSessionCookieHeader());
+    }
+    return { ownerId: 'public:anonymous', responseHeaders };
+  }
+
+  const headers = new Headers({ 'Cache-Control': 'no-store' });
+  if (session.status === 'invalid') {
+    headers.append('Set-Cookie', clearedSessionCookieHeader());
+  }
+  return {
+    response: Response.json(
+      { success: false, errorCode: 'LOGIN_REQUIRED', error: 'login_required' },
+      { status: 401, headers },
+    ),
+  };
+}
 
 /**
- * Resolve the anonymous owner identity and run a handler with its response
- * headers.
+ * Resolve the authenticated or legacy anonymous owner identity and run a
+ * handler with its response headers.
  *
- * The Set-Cookie minted by resolveRequestOwnerId must ride every response,
- * including 4xx and 5xx: a client that retries after an error keeps the same
- * owner partition, while a 500 that dropped the cookie would silently make
- * the retry a different anonymous owner.
+ * In legacy mode, the Set-Cookie minted by resolveRequestOwnerId must ride
+ * every response, including 4xx and 5xx. In OIDC mode, this boundary resolves
+ * and rechecks the database-backed application session on every request.
  */
 export async function withRequestOwnerId(
-  req: Pick<Request, 'headers'>,
-  handler: (ownerId: string, responseHeaders: Headers) => Promise<Response>,
+  req: Pick<Request, 'headers' | 'method' | 'url'>,
+  handler: (
+    ownerId: string,
+    responseHeaders: Headers,
+    identity?: RequestOwnerIdentity,
+  ) => Promise<Response>,
+  options?: RequestOwnerOptions,
 ): Promise<Response> {
-  const responseHeaders = new Headers();
-  const ownerId = resolveRequestOwnerId(req, responseHeaders);
+  const resolution = await resolveRequestOwnerIdForRequest(req, options);
+  if ('response' in resolution) return resolution.response;
+  const attribution: UsageAttribution = resolution.tenantId
+    ? { ownerId: resolution.ownerId, tenantId: resolution.tenantId }
+    : attributionForOwner(resolution.ownerId);
   try {
-    return await handler(ownerId, responseHeaders);
+    return await runWithUsageAttribution(attribution, () =>
+      handler(resolution.ownerId, resolution.responseHeaders, {
+        ownerId: resolution.ownerId,
+        tenantId: resolution.tenantId,
+      }),
+    );
   } catch (error) {
-    console.error('[agent-runtime] request failed under an anonymous owner', error);
-    return new Response('Internal Server Error', { status: 500, headers: responseHeaders });
+    console.error('[agent-runtime] owner-scoped request failed', error);
+    return new Response('Internal Server Error', {
+      status: 500,
+      headers: resolution.responseHeaders,
+    });
   }
 }

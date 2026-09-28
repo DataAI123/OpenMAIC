@@ -69,13 +69,17 @@ export async function GET(req: NextRequest, { params }: Params) {
     );
   }
 
-  return withRequestOwnerId(req, async (ownerId, responseHeaders) => {
-    const { id } = await params;
-    const store = await getOwnerScopedDocumentStore(ownerId);
-    const document = await store.loadDocument(id);
-    if (!document) return ownerNotFound(responseHeaders);
-    const wanted = new Set(requested);
-    const scenes = document.scenes.filter((scene) => wanted.has(scene.id));
-    return ownerJson({ scenes }, 200, responseHeaders);
-  });
+  return withRequestOwnerId(
+    req,
+    async (ownerId, responseHeaders, identity) => {
+      const { id } = await params;
+      const store = await getOwnerScopedDocumentStore(ownerId, undefined, identity?.tenantId);
+      const document = await store.loadDocument(id);
+      if (!document) return ownerNotFound(responseHeaders);
+      const wanted = new Set(requested);
+      const scenes = document.scenes.filter((scene) => wanted.has(scene.id));
+      return ownerJson({ scenes }, 200, responseHeaders);
+    },
+    { allowAnonymousPublicRead: () => true },
+  );
 }

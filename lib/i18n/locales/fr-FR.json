@@ -1,4 +1,9 @@
 {
+  "auth": {
+    "denied": "La connexion a été annulée ou non autorisée.",
+    "failed": "La connexion n'a pas pu être terminée. Veuillez réessayer.",
+    "unavailable": "L'authentification est temporairement indisponible. Veuillez réessayer plus tard."
+  },
   "common": {
     "you": "Vous",
     "confirm": "Confirmer",

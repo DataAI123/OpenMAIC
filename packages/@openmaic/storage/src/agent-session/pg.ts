@@ -81,6 +81,16 @@ export interface PgAgentSessionStoreOptions extends AgentSessionHooks {
    * query to it, then commits or rolls back before releasing the connection.
    */
   withTransaction: WithTransaction;
+  /**
+   * The tenant this store acts in. Resolved server-side (from the application
+   * session), never from request input. When set, every statement on the
+   * session table is constrained to this tenant: the store stamps it on
+   * create, lists only this tenant's sessions, and refuses another tenant's
+   * row exactly like a missing one. Absent (the default) preserves the legacy
+   * contract — no tenant dimension, sessions addressed by owner alone — so
+   * existing single-tenant and anonymous callers are unaffected.
+   */
+  tenantScope?: string;
   tableNames?: Partial<AgentSessionTableNames>;
   logger?: AgentSessionLogger;
   /** Test seams; production callers normally use the defaults. */
@@ -93,6 +103,7 @@ export const AGENT_SESSION_PG_SCHEMA = `
 CREATE TABLE IF NOT EXISTS agent_sessions (
   id                  TEXT PRIMARY KEY,
   owner_id            TEXT NOT NULL,
+  tenant_id           TEXT,
   prompt              TEXT NOT NULL,
   title               TEXT,
   title_state         TEXT NOT NULL DEFAULT 'manual',
@@ -127,6 +138,14 @@ ALTER TABLE agent_sessions
 
 ALTER TABLE agent_sessions
   ADD COLUMN IF NOT EXISTS title_state TEXT NOT NULL DEFAULT 'manual';
+
+-- Tenant boundary. Nullable on purpose: a legacy (anonymous) session has no
+-- tenant, and NULL is what keeps it addressable by owner alone. A
+-- tenant-scoped store stamps its own tenant here and every later read carries
+-- "AND tenant_id = $n", so a NULL row is invisible to it (fail-closed) and a
+-- row of another tenant is refused exactly like a missing one.
+ALTER TABLE agent_sessions
+  ADD COLUMN IF NOT EXISTS tenant_id TEXT;
 
 DO $agent_session_title_state_constraint$
 BEGIN
@@ -169,6 +188,11 @@ CREATE INDEX IF NOT EXISTS agent_sessions_status_live_idx
 
 CREATE INDEX IF NOT EXISTS agent_sessions_owner_live_idx
   ON agent_sessions (owner_id, created_at) WHERE deleted_at IS NULL;
+
+-- Serves the tenant-scoped owner listing and by-id reads: the composite is
+-- (tenant_id, owner_id, created_at) so a tenant + owner scan needs no sort.
+CREATE INDEX IF NOT EXISTS agent_sessions_tenant_owner_live_idx
+  ON agent_sessions (tenant_id, owner_id, created_at) WHERE deleted_at IS NULL;
 
 CREATE TABLE IF NOT EXISTS agent_session_events (
   session_id TEXT NOT NULL REFERENCES agent_sessions(id) ON DELETE CASCADE,
@@ -377,6 +401,8 @@ export async function ensureAgentSessionSchema(
 interface SessionRow extends Record<string, unknown> {
   id: string;
   owner_id: string;
+  /** Null on legacy (anonymous) rows; never null on a tenant-stamped row. */
+  tenant_id: string | null;
   prompt: string;
   title: string | null;
   stage_id: string;
@@ -394,7 +420,7 @@ interface SessionRow extends Record<string, unknown> {
   updated_at: Date | string;
 }
 
-const SESSION_COLUMNS = `id, owner_id, prompt, title, stage_id, skill_id, origin,
+const SESSION_COLUMNS = `id, owner_id, tenant_id, prompt, title, stage_id, skill_id, origin,
   existing_course, status, attempt, delivered_user_message_seq, lease_worker_id, lease_worker_pid,
   lease_heartbeat_at, error, created_at, updated_at`;
 
@@ -415,6 +441,7 @@ function sessionMeta(row: SessionRow): AgentSessionMeta {
   return {
     id: row.id,
     ownerId: row.owner_id,
+    ...(row.tenant_id ? { tenantId: row.tenant_id } : {}),
     prompt: row.prompt,
     ...(row.title ? { title: row.title } : {}),
     stageId: row.stage_id,
@@ -459,6 +486,8 @@ export class PgAgentSessionStore
   private readonly queryable: Queryable;
   private readonly transactionHook: WithTransaction;
   private readonly tables: AgentSessionTableNames;
+  /** Tenant every session-table statement is constrained to; see the option. */
+  private readonly tenantScope: string | undefined;
   private readonly logger: AgentSessionLogger;
   private readonly createId: () => string;
   private readonly clock: () => number;
@@ -479,6 +508,7 @@ export class PgAgentSessionStore
     this.queryable = queryable;
     this.transactionHook = options.withTransaction;
     this.tables = resolveTableNames(options.tableNames);
+    this.tenantScope = options.tenantScope;
     this.logger =
       options.logger ??
       ({
@@ -498,6 +528,21 @@ export class PgAgentSessionStore
     return quoteIdentifier(this.tables[name]);
   }
 
+  /**
+   * The tenant predicate appended to a session-table statement, collapsed to
+   * the empty string when the store is not tenant-scoped (legacy behavior).
+   * `paramIndex` is the placeholder the caller reserved for the tenant — always
+   * one past its own parameters, paired with {@link tenantArgs}.
+   */
+  private tenantFilter(paramIndex: number, column = 'tenant_id'): string {
+    return this.tenantScope === undefined ? '' : ` AND ${column} = $${paramIndex}`;
+  }
+
+  /** The tenant parameter matching {@link tenantFilter}; empty when unscoped. */
+  private tenantArgs(): unknown[] {
+    return this.tenantScope === undefined ? [] : [this.tenantScope];
+  }
+
   private transaction<T>(body: (tx: Queryable) => Promise<T>): Promise<T> {
     return this.transactionHook(body);
   }
@@ -510,8 +555,10 @@ export class PgAgentSessionStore
   ): Promise<SessionRow | undefined> {
     const result = await queryable.query<SessionRow>(
       `SELECT ${SESSION_COLUMNS} FROM ${this.table('sessions')}
-       WHERE id = $1${includeDeleted ? '' : ' AND deleted_at IS NULL'}${lock ? ' FOR UPDATE' : ''}`,
-      [sessionId],
+       WHERE id = $1${includeDeleted ? '' : ' AND deleted_at IS NULL'}${this.tenantFilter(2)}${
+         lock ? ' FOR UPDATE' : ''
+       }`,
+      [sessionId, ...this.tenantArgs()],
     );
     return result.rows[0];
   }
@@ -524,11 +571,12 @@ export class PgAgentSessionStore
       // clearing or renaming during a rolling deploy replaces it, fencing both
       // claims and commits without another state or token.
       const title = input.titleState === 'pending' ? '' : null;
+      const tenantScoped = this.tenantScope !== undefined;
       const result = await tx.query<SessionRow>(
         `INSERT INTO ${this.table('sessions')}
           (id, owner_id, prompt, title, title_state, stage_id, skill_id, origin, existing_course,
-           status, attempt)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 0)
+           status, attempt${tenantScoped ? ', tenant_id' : ''})
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 0${tenantScoped ? ', $11' : ''})
          RETURNING ${SESSION_COLUMNS}`,
         [
           id,
@@ -541,6 +589,7 @@ export class PgAgentSessionStore
           input.origin ?? null,
           input.existingCourse ?? false,
           input.status ?? 'queued',
+          ...this.tenantArgs(),
         ],
       );
       const meta = sessionMeta(result.rows[0]!);
@@ -567,8 +616,8 @@ export class PgAgentSessionStore
   async listSessionsByOwner(ownerId: string): Promise<AgentSessionMeta[]> {
     const result = await this.queryable.query<SessionRow>(
       `SELECT ${SESSION_COLUMNS} FROM ${this.table('sessions')}
-       WHERE owner_id = $1 AND deleted_at IS NULL ORDER BY created_at, id`,
-      [ownerId],
+       WHERE owner_id = $1 AND deleted_at IS NULL${this.tenantFilter(2)} ORDER BY created_at, id`,
+      [ownerId, ...this.tenantArgs()],
     );
     return result.rows.map(sessionMeta);
   }
@@ -582,9 +631,9 @@ export class PgAgentSessionStore
       const result = await tx.query<SessionRow>(
         `UPDATE ${this.table('sessions')}
          SET title = $3, title_state = 'manual', updated_at = clock_timestamp()
-         WHERE id = $1 AND owner_id = $2 AND deleted_at IS NULL
+         WHERE id = $1 AND owner_id = $2 AND deleted_at IS NULL${this.tenantFilter(4)}
          RETURNING ${SESSION_COLUMNS}`,
-        [sessionId, ownerId, title === null ? null : sanitizePgText(title)],
+        [sessionId, ownerId, title === null ? null : sanitizePgText(title), ...this.tenantArgs()],
       );
       const row = result.rows[0];
       if (!row) return null;
@@ -605,8 +654,8 @@ export class PgAgentSessionStore
         title_state: string;
       }>(
         `SELECT prompt, existing_course, title_state FROM ${this.table('sessions')}
-         WHERE id = $1 AND owner_id = $2 AND deleted_at IS NULL FOR UPDATE`,
-        [sessionId, ownerId],
+         WHERE id = $1 AND owner_id = $2 AND deleted_at IS NULL${this.tenantFilter(3)} FOR UPDATE`,
+        [sessionId, ownerId, ...this.tenantArgs()],
       );
       const session = locked.rows[0];
       if (!session || session.title_state !== 'pending') return null;
@@ -627,9 +676,9 @@ export class PgAgentSessionStore
       const claimed = await tx.query<{ id: string }>(
         `UPDATE ${this.table('sessions')} SET title_state = 'automatic'
          WHERE id = $1 AND owner_id = $2 AND deleted_at IS NULL
-           AND title_state = 'pending' AND title = ''
+           AND title_state = 'pending' AND title = ''${this.tenantFilter(3)}
          RETURNING id`,
-        [sessionId, ownerId],
+        [sessionId, ownerId, ...this.tenantArgs()],
       );
       return claimed.rows[0] ? text : null;
     });
@@ -647,9 +696,9 @@ export class PgAgentSessionStore
         `UPDATE ${this.table('sessions')}
          SET title = $3, updated_at = clock_timestamp()
          WHERE id = $1 AND owner_id = $2 AND deleted_at IS NULL
-           AND title_state = 'automatic' AND title = ''
+           AND title_state = 'automatic' AND title = ''${this.tenantFilter(4)}
          RETURNING ${SESSION_COLUMNS}`,
-        [sessionId, ownerId, safeTitle],
+        [sessionId, ownerId, safeTitle, ...this.tenantArgs()],
       );
       const row = result.rows[0];
       if (!row) return null;
@@ -667,8 +716,8 @@ export class PgAgentSessionStore
       const result = await tx.query<{ id: string }>(
         `UPDATE ${this.table('sessions')}
          SET deleted_at = now(), updated_at = now()
-         WHERE id = $1 AND owner_id = $2 AND deleted_at IS NULL RETURNING id`,
-        [sessionId, ownerId],
+         WHERE id = $1 AND owner_id = $2 AND deleted_at IS NULL${this.tenantFilter(3)} RETURNING id`,
+        [sessionId, ownerId, ...this.tenantArgs()],
       );
       if (!result.rows[0]) return false;
       await this.appendProjection({ type: 'session_deleted', sessionId, ts: this.clock() }, tx);
@@ -680,6 +729,11 @@ export class PgAgentSessionStore
    * Attempt charging is per takeover: queued claims and abandoned (non-null
    * stale lease) takeovers increment `attempt`; clean-park (null lease)
    * takeovers do not. Full contract in {@link AgentSessionStore}.
+   *
+   * Deliberately the ONE statement that ignores `tenantScope`: the claim scan
+   * is the worker's cross-tenant entry point — it must find queued work in
+   * every tenant and hands the claimed row's tenant back via the returned
+   * meta, which is what lets the run that follows be tenant-scoped.
    */
   async claimNextSession(
     workerId: string,
@@ -809,9 +863,9 @@ export class PgAgentSessionStore
        SET status = 'cancelled', attempt = 0, error = NULL,
            lease_worker_id = NULL, lease_worker_pid = NULL, lease_heartbeat_at = NULL,
            cancel_requested_at = NULL, updated_at = now()
-       WHERE id = $1 AND deleted_at IS NULL AND cancel_requested_at IS NOT NULL
+       WHERE id = $1 AND deleted_at IS NULL AND cancel_requested_at IS NOT NULL${this.tenantFilter(2)}
        RETURNING ${SESSION_COLUMNS}`,
-      [sessionId],
+      [sessionId, ...this.tenantArgs()],
     );
     const row = result.rows[0];
     if (!row) return;
@@ -831,8 +885,8 @@ export class PgAgentSessionStore
     const result = await this.queryable.query<{ id: string }>(
       `UPDATE ${this.table('sessions')}
        SET lease_heartbeat_at = $3, updated_at = now()
-       WHERE id = $1 AND lease_worker_id = $2 AND deleted_at IS NULL RETURNING id`,
-      [sessionId, workerId, this.clock()],
+       WHERE id = $1 AND lease_worker_id = $2 AND deleted_at IS NULL${this.tenantFilter(4)} RETURNING id`,
+      [sessionId, workerId, this.clock(), ...this.tenantArgs()],
     );
     return result.rows.length > 0;
   }
@@ -848,8 +902,8 @@ export class PgAgentSessionStore
        SET delivered_user_message_seq = GREATEST(delivered_user_message_seq, $4),
            updated_at = now()
        WHERE id = $1 AND lease_worker_id = $2 AND attempt = $3
-         AND deleted_at IS NULL RETURNING id`,
-      [sessionId, workerId, attempt, messageSeq],
+         AND deleted_at IS NULL${this.tenantFilter(5)} RETURNING id`,
+      [sessionId, workerId, attempt, messageSeq, ...this.tenantArgs()],
     );
     return result.rows.length > 0;
   }
@@ -863,9 +917,9 @@ export class PgAgentSessionStore
     const result = await transaction.query<{ attempt: number }>(
       `SELECT attempt FROM ${this.table('sessions')}
        WHERE id = $1 AND lease_worker_id = $2 AND attempt = $3
-         AND cancel_requested_at IS NULL AND deleted_at IS NULL
+         AND cancel_requested_at IS NULL AND deleted_at IS NULL${this.tenantFilter(4)}
        FOR SHARE`,
-      [sessionId, workerId, attempt],
+      [sessionId, workerId, attempt, ...this.tenantArgs()],
     );
     if (!result.rows[0]) throw new AgentSessionLeaseLostError(sessionId, workerId, attempt);
   }
@@ -891,7 +945,7 @@ export class PgAgentSessionStore
              updated_at = now()
          WHERE id = $1 AND lease_worker_id = $2 AND deleted_at IS NULL
            AND ($8::bigint IS NULL OR cancel_requested_at = $8)
-           AND ($9::integer IS NULL OR attempt = $9)
+           AND ($9::integer IS NULL OR attempt = $9)${this.tenantFilter(10)}
          RETURNING attempt`,
         [
           sessionId,
@@ -903,6 +957,7 @@ export class PgAgentSessionStore
           patch.resetAttempt === true,
           patch.consumeCancelRequestedAt ?? null,
           patch.expectedAttempt ?? null,
+          ...this.tenantArgs(),
         ],
       );
       const row = result.rows[0];
@@ -926,8 +981,8 @@ export class PgAgentSessionStore
       `UPDATE ${this.table('sessions')}
        SET lease_worker_id = NULL, lease_worker_pid = NULL, lease_heartbeat_at = NULL,
            updated_at = now()
-       WHERE id = $1 AND lease_worker_id = $2 AND deleted_at IS NULL`,
-      [sessionId, workerId],
+       WHERE id = $1 AND lease_worker_id = $2 AND deleted_at IS NULL${this.tenantFilter(3)}`,
+      [sessionId, workerId, ...this.tenantArgs()],
     );
   }
 
@@ -936,15 +991,18 @@ export class PgAgentSessionStore
     sessionId: string,
     workerId: string | null,
   ): Promise<{ owner_id: string; status: AgentSessionMeta['status']; attempt: number } | null> {
+    const params: unknown[] = workerId === null ? [sessionId] : [sessionId, workerId];
     const result = await tx.query<{
       owner_id: string;
       status: AgentSessionMeta['status'];
       attempt: number;
     }>(
       `SELECT owner_id, status, attempt FROM ${this.table('sessions')}
-       WHERE id = $1 AND deleted_at IS NULL${workerId === null ? '' : ' AND lease_worker_id = $2'}
+       WHERE id = $1 AND deleted_at IS NULL${
+         workerId === null ? '' : ' AND lease_worker_id = $2'
+       }${this.tenantFilter(params.length + 1)}
        FOR UPDATE`,
-      workerId === null ? [sessionId] : [sessionId, workerId],
+      [...params, ...this.tenantArgs()],
     );
     return result.rows[0] ?? null;
   }
@@ -1149,8 +1207,8 @@ export class PgAgentSessionStore
     }>(
       `SELECT e.seq, e.ts, e.data FROM ${this.table('events')} e
        INNER JOIN ${this.table('sessions')} s ON s.id = e.session_id
-       WHERE e.session_id = $1 AND e.type = $2 AND s.deleted_at IS NULL ORDER BY e.seq`,
-      [sessionId, AGENT_SESSION_LIFECYCLE.userMessage],
+       WHERE e.session_id = $1 AND e.type = $2 AND s.deleted_at IS NULL${this.tenantFilter(3, 's.tenant_id')} ORDER BY e.seq`,
+      [sessionId, AGENT_SESSION_LIFECYCLE.userMessage, ...this.tenantArgs()],
     );
     return result.rows.map((row) => {
       const data = decodedObject(row.data);
@@ -1169,8 +1227,8 @@ export class PgAgentSessionStore
     const result = await this.queryable.query<{ max: number | string | null }>(
       `SELECT max(e.seq) AS max FROM ${this.table('events')} e
        INNER JOIN ${this.table('sessions')} s ON s.id = e.session_id
-       WHERE e.session_id = $1 AND s.deleted_at IS NULL`,
-      [sessionId],
+       WHERE e.session_id = $1 AND s.deleted_at IS NULL${this.tenantFilter(2, 's.tenant_id')}`,
+      [sessionId, ...this.tenantArgs()],
     );
     return Number(result.rows[0]?.max ?? 0);
   }
@@ -1190,9 +1248,9 @@ export class PgAgentSessionStore
       `SELECT e.seq, e.ts, e.attempt, e.type, e.data
        FROM ${this.table('events')} e
        INNER JOIN ${this.table('sessions')} s ON s.id = e.session_id
-       WHERE e.session_id = $1 AND e.seq > $2 AND s.deleted_at IS NULL
+       WHERE e.session_id = $1 AND e.seq > $2 AND s.deleted_at IS NULL${this.tenantFilter(4, 's.tenant_id')}
        ORDER BY e.seq LIMIT $3`,
-      [sessionId, afterSeq, limit],
+      [sessionId, afterSeq, limit, ...this.tenantArgs()],
     );
     return result.rows.map((row) => ({
       id: Number(row.seq),
@@ -1236,7 +1294,7 @@ export class PgAgentSessionStore
          FROM ${this.table('events')} e
          WHERE e.session_id = $1 AND e.seq > $2
            AND EXISTS (SELECT 1 FROM ${this.table('sessions')} s
-                       WHERE s.id = $1 AND s.deleted_at IS NULL)
+                       WHERE s.id = $1 AND s.deleted_at IS NULL${this.tenantFilter(4, 's.tenant_id')})
          ORDER BY e.seq LIMIT $3
        ), ranked AS (
          SELECT seq, lag(type) OVER (ORDER BY seq) AS prev_type,
@@ -1248,7 +1306,7 @@ export class PgAgentSessionStore
           OR r.prev_type IS DISTINCT FROM 'message_update'
           OR r.next_type IS DISTINCT FROM 'message_update'
        ORDER BY p.seq`,
-      [sessionId, afterSeq, limit],
+      [sessionId, afterSeq, limit, ...this.tenantArgs()],
     );
     return {
       events: result.rows.map((row) => ({
@@ -1272,8 +1330,8 @@ export class PgAgentSessionStore
     const result = await this.queryable.query<{ present: number }>(
       `SELECT 1 AS present FROM ${this.table('events')} e
        INNER JOIN ${this.table('sessions')} s ON s.id = e.session_id
-       WHERE e.session_id = $1 AND e.type = ANY($2::text[]) AND s.deleted_at IS NULL LIMIT 1`,
-      [sessionId, types],
+       WHERE e.session_id = $1 AND e.type = ANY($2::text[]) AND s.deleted_at IS NULL${this.tenantFilter(3, 's.tenant_id')} LIMIT 1`,
+      [sessionId, types, ...this.tenantArgs()],
     );
     return result.rows.length > 0;
   }
@@ -1283,9 +1341,9 @@ export class PgAgentSessionStore
       `UPDATE ${this.table('sessions')}
        SET status = 'queued', attempt = CASE WHEN $2::boolean THEN 0 ELSE attempt END,
            error = NULL, cancel_requested_at = NULL, updated_at = now()
-       WHERE id = $1 AND deleted_at IS NULL
+       WHERE id = $1 AND deleted_at IS NULL${this.tenantFilter(3)}
          AND status IN ('succeeded', 'failed', 'cancelled') RETURNING attempt`,
-      [sessionId, reset],
+      [sessionId, reset, ...this.tenantArgs()],
     );
     const row = result.rows[0];
     if (!row) return false;
@@ -1316,8 +1374,8 @@ export class PgAgentSessionStore
       const result = await tx.query<{ id: string }>(
         `UPDATE ${this.table('sessions')}
          SET cancel_requested_at = $2, updated_at = now()
-         WHERE id = $1 AND deleted_at IS NULL AND cancel_requested_at IS NULL RETURNING id`,
-        [sessionId, ts],
+         WHERE id = $1 AND deleted_at IS NULL AND cancel_requested_at IS NULL${this.tenantFilter(3)} RETURNING id`,
+        [sessionId, ts, ...this.tenantArgs()],
       );
       if (result.rows[0]) {
         await this.appendProjection({ type: 'session_cancel_requested', sessionId, ts }, tx);
@@ -1336,8 +1394,8 @@ export class PgAgentSessionStore
   async getCancelRequestedAt(sessionId: string): Promise<number | null> {
     const result = await this.queryable.query<{ requested_at: number | string | null }>(
       `SELECT cancel_requested_at AS requested_at FROM ${this.table('sessions')}
-       WHERE id = $1 AND deleted_at IS NULL`,
-      [sessionId],
+       WHERE id = $1 AND deleted_at IS NULL${this.tenantFilter(2)}`,
+      [sessionId, ...this.tenantArgs()],
     );
     const value = result.rows[0]?.requested_at;
     return value === null || value === undefined ? null : Number(value);
@@ -1400,8 +1458,8 @@ export class PgAgentSessionStore
          FROM ${this.table('urls')} AS urls
          JOIN ${this.table('sessions')} AS sessions
            ON sessions.id = urls.session_id AND sessions.deleted_at IS NULL
-        WHERE urls.session_id = $1`,
-      [sessionId],
+        WHERE urls.session_id = $1${this.tenantFilter(2, 'sessions.tenant_id')}`,
+      [sessionId, ...this.tenantArgs()],
     );
     return result.rows.some((row) => urlOrigin(row.url) === candidateOrigin);
   }

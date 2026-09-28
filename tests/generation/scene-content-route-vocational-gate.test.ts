@@ -97,6 +97,8 @@ describe('scene-content vocational gate', () => {
 
 function mockRequest(outline: SceneOutline, requirements?: { taskEngineMode?: boolean }) {
   return {
+    method: 'POST',
+    headers: new Headers(),
     json: async () => ({
       outline,
       allOutlines: [outline],

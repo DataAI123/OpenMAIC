@@ -23,7 +23,13 @@ import {
 import { runPiDirectorLoop } from '@/lib/chat/pi/director-loop';
 import type { SendEvent } from '@/lib/chat/pi/types';
 import { resolveModel } from '@/lib/server/resolve-model';
-import { apiError } from '@/lib/server/api-response';
+import { apiError, type ApiErrorCode } from '@/lib/server/api-response';
+import { withRequestOwnerId } from '@/lib/server/agent-runtime/with-owner';
+import { withOwnerResponseHeaders } from '@/lib/server/agent-runtime/route-response';
+import {
+  consumeActionRateLimit,
+  UserApiRateLimitExceededError,
+} from '@/lib/server/user-api-rate-limit';
 import type { ThinkingConfig } from '@/lib/types/provider';
 import type { StatelessChatRequest } from '@/lib/types/chat';
 import { resolveClassroomWebSearchConfig } from '@/lib/server/web-search-config';
@@ -42,278 +48,299 @@ const log = createLogger('Pi Chat API');
 export const maxDuration = 300;
 
 export async function POST(req: NextRequest) {
-  if (!isPiChatEnabled()) {
-    return apiError('INVALID_REQUEST', 404, 'Pi chat runtime is disabled');
-  }
+  return withRequestOwnerId(req, async (ownerId, responseHeaders) => {
+    const fail = (code: ApiErrorCode, status: number, error: string, details?: string) =>
+      withOwnerResponseHeaders(apiError(code, status, error, details), responseHeaders);
 
-  const encoder = new TextEncoder();
-  let chatModel: string | undefined;
-  let chatMessageCount: number | undefined;
-
-  try {
-    const body: StatelessChatRequest = await req.json();
-    chatModel = body.model;
-    chatMessageCount = body.messages?.length;
-
-    if (!body.messages || !Array.isArray(body.messages)) {
-      return apiError('MISSING_REQUIRED_FIELD', 400, 'Missing required field: messages');
+    if (!isPiChatEnabled()) {
+      return fail('INVALID_REQUEST', 404, 'Pi chat runtime is disabled');
     }
 
-    if (!body.storeState) {
-      return apiError('MISSING_REQUIRED_FIELD', 400, 'Missing required field: storeState');
-    }
-
-    if (!body.config || body.config.agentIds == null) {
-      return apiError('MISSING_REQUIRED_FIELD', 400, 'Missing required field: config.agentIds');
-    }
-
-    if (
-      (body.elementReference !== undefined || body.interactiveState !== undefined) &&
-      !isCoursewareReferenceEnabled()
-    ) {
-      return apiError('INVALID_REQUEST', 400, 'Courseware references are disabled');
-    }
-
-    let elementReference;
-    let interactiveStateNote;
+    // One Pi turn drives the whole server-side director loop (many model calls),
+    // so it shares the per-user 5-req/60s action budget before any provider call.
     try {
-      ({ elementReference, stateNote: interactiveStateNote } = attachInteractiveState(
-        body,
-        resolveElementReference(body),
-      ));
+      await consumeActionRateLimit(ownerId, 'chat_pi');
     } catch (error) {
-      if (error instanceof ElementReferenceValidationError) {
-        return apiError('INVALID_REQUEST', 400, error.message);
+      if (error instanceof UserApiRateLimitExceededError) {
+        responseHeaders.set('Retry-After', String(error.retryAfterSeconds));
+        return fail('RATE_LIMITED', 429, 'Too many chat turns');
       }
-      throw error;
+      return fail('INTERNAL_ERROR', 503, 'Rate limiting is unavailable');
     }
 
-    const agentIds = body.config.agentIds;
-    if (
-      !Array.isArray(agentIds) ||
-      agentIds.length === 0 ||
-      agentIds.some((id) => typeof id !== 'string' || id.trim().length === 0 || id !== id.trim()) ||
-      new Set(agentIds).size !== agentIds.length
-    ) {
-      return apiError(
-        'INVALID_REQUEST',
-        400,
-        'config.agentIds must be a non-empty array of unique, non-empty strings',
-      );
-    }
+    const encoder = new TextEncoder();
+    let chatModel: string | undefined;
+    let chatMessageCount: number | undefined;
 
-    const {
-      model: languageModel,
-      apiKey: resolvedApiKey,
-      providerId,
-      modelInfo,
-      thinkingConfig: resolvedThinkingConfig,
-    } = await resolveModel({
-      modelString: body.model,
-      stage: 'chat-adapter',
-      apiKey: body.apiKey,
-      baseUrl: body.baseUrl,
-      providerType: body.providerType,
-      // Let resolveModel arbitrate thinking too: a routed chat-adapter's thinking
-      // wins, an unrouted one honors this client thinking (see resolve-model.ts).
-      thinkingConfig: body.thinkingConfig ?? body.thinking,
-    });
-
-    if (isProviderKeyRequired(providerId) && !resolvedApiKey) {
-      return apiError('MISSING_API_KEY', 401, 'API Key is required');
-    }
-
-    const agentConfigs = resolveAgentConfigs(body);
-    const resolvedAgentIds = new Set(agentConfigs.map((agent) => agent.id));
-    const unresolvedAgentIds = agentIds.filter((id) => !resolvedAgentIds.has(id));
-    if (unresolvedAgentIds.length > 0) {
-      return apiError(
-        'INVALID_REQUEST',
-        400,
-        `Unknown classroom agents in config.agentIds: ${unresolvedAgentIds.join(', ')}`,
-      );
-    }
-    if (agentConfigs.length === 0) {
-      return apiError(
-        'INVALID_REQUEST',
-        400,
-        `No valid classroom agents found for config.agentIds: ${body.config.agentIds.join(', ')}`,
-      );
-    }
-
-    const signal = req.signal;
-    const abortController = new AbortController();
-    signal.addEventListener('abort', () => abortController.abort(), { once: true });
-
-    const { readable, writable } = new TransformStream();
-    const writer = writable.getWriter();
-
-    const send: SendEvent = async (event) => {
-      await writer.write(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
-    };
-
-    const thinkingConfig: ThinkingConfig = resolvedThinkingConfig ?? {
-      mode: 'disabled',
-      enabled: false,
-    };
-
-    const maxAgentTurns = getPiMaxAgentTurns(body);
-    const maxActionsPerAgent = getPiMaxActionsPerAgent(body);
-    const enableWhiteboardTools = body.config.piEnableWhiteboardTools === true;
-    const childRuntimeMode = isPiNativeChildRuntimeEnabled() ? 'native' : 'legacy';
-    const enableNativeChildSpotlight = isPiNativeChildSpotlightEnabled();
-    const requestStartStageId = body.storeState.stage?.id;
-    const validRequestStartStageId =
-      typeof requestStartStageId === 'string' &&
-      requestStartStageId.length > 0 &&
-      requestStartStageId === requestStartStageId.trim()
-        ? requestStartStageId
-        : undefined;
-    const nativeWhiteboardRequested = agentConfigs.some((agent) =>
-      hasNativeWhiteboardAction(agent.allowedActions),
-    );
-    let nativeWhiteboardService: ReturnType<typeof createWhiteboardRuntimeService> | undefined;
-    let nativeWhiteboardLearnerKey: string | undefined;
-    if (
-      childRuntimeMode === 'native' &&
-      enableWhiteboardTools &&
-      nativeWhiteboardRequested &&
-      validRequestStartStageId &&
-      process.env.NEXT_PUBLIC_PERSISTENCE === '1' &&
-      process.env.DATABASE_URL &&
-      process.env.PERSISTENCE_DEV_TOKEN
-    ) {
-      const principal = authenticatePersistenceHeaders(req.headers);
-      const learnerKey = principal?.learnerKey;
-      if (learnerKey && learnerKey === learnerKey.trim()) {
-        try {
-          const provider = await getServerPersistenceProvider(process.env.DATABASE_URL);
-          nativeWhiteboardLearnerKey = learnerKey;
-          nativeWhiteboardService = createWhiteboardRuntimeService({
-            store: provider.runtimeStore,
-            resolveLearnerKey: () => learnerKey,
-          });
-        } catch {
-          log.warn('Native whiteboard capability unavailable: persistence initialization failed');
-        }
-      }
-    }
-    let nativeWebSearchConfig: ReturnType<typeof resolveClassroomWebSearchConfig>;
     try {
-      nativeWebSearchConfig =
-        childRuntimeMode === 'native'
-          ? resolveClassroomWebSearchConfig({
-              webSearchProviderId: body.webSearchProviderId,
-              webSearchApiKey: body.webSearchApiKey,
-              webSearchBaseUrl: body.webSearchBaseUrl,
-              webSearchModelId: body.webSearchModelId,
-              baiduSubSources: body.baiduSubSources,
-            })
-          : undefined;
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Invalid Web Search configuration';
-      return apiError('INVALID_REQUEST', 400, message);
-    }
+      const body: StatelessChatRequest = await req.json();
+      chatModel = body.model;
+      chatMessageCount = body.messages?.length;
 
-    log.info(
-      `Pi request agents=${body.config.agentIds.join(', ')} messages=${body.messages.length} maxAgentTurns=${maxAgentTurns}`,
-    );
+      if (!body.messages || !Array.isArray(body.messages)) {
+        return fail('MISSING_REQUIRED_FIELD', 400, 'Missing required field: messages');
+      }
 
-    (async () => {
-      let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
-      const startHeartbeat = () => {
-        heartbeatTimer = setInterval(() => {
-          writer.write(encoder.encode(`:heartbeat\n\n`)).catch(() => stopHeartbeat());
-        }, 15_000);
-      };
-      const stopHeartbeat = () => {
-        if (heartbeatTimer) {
-          clearInterval(heartbeatTimer);
-          heartbeatTimer = null;
-        }
-      };
+      if (!body.storeState) {
+        return fail('MISSING_REQUIRED_FIELD', 400, 'Missing required field: storeState');
+      }
 
+      if (!body.config || body.config.agentIds == null) {
+        return fail('MISSING_REQUIRED_FIELD', 400, 'Missing required field: config.agentIds');
+      }
+
+      if (
+        (body.elementReference !== undefined || body.interactiveState !== undefined) &&
+        !isCoursewareReferenceEnabled()
+      ) {
+        return fail('INVALID_REQUEST', 400, 'Courseware references are disabled');
+      }
+
+      let elementReference;
+      let interactiveStateNote;
       try {
-        startHeartbeat();
-
-        await runPiDirectorLoop({
+        ({ elementReference, stateNote: interactiveStateNote } = attachInteractiveState(
           body,
-          elementReference,
-          interactiveStateNote,
-          agentConfigs,
-          send,
-          languageModel,
-          thinkingConfig,
-          maxOutputTokens: modelInfo?.outputWindow,
-          contextWindow: modelInfo?.contextWindow,
-          abortSignal: abortController.signal,
-          signal,
-          maxAgentTurns,
-          maxActionsPerAgent,
-          enableWhiteboardTools,
-          childRuntimeMode,
-          enableNativeChildSpotlight,
-          nativeWebSearchConfig,
-          nativeWhiteboardService,
-          nativeWhiteboardStageId: nativeWhiteboardService ? validRequestStartStageId : undefined,
-          nativeWhiteboardLearnerKey,
-          requestStartManualVisibilityRevision:
-            Number.isSafeInteger(body.storeState.whiteboardManualVisibilityRevision) &&
-            (body.storeState.whiteboardManualVisibilityRevision ?? -1) >= 0
-              ? body.storeState.whiteboardManualVisibilityRevision
-              : 0,
-        });
+          resolveElementReference(body),
+        ));
+      } catch (error) {
+        if (error instanceof ElementReferenceValidationError) {
+          return fail('INVALID_REQUEST', 400, error.message);
+        }
+        throw error;
+      }
 
-        if (signal.aborted) {
+      const agentIds = body.config.agentIds;
+      if (
+        !Array.isArray(agentIds) ||
+        agentIds.length === 0 ||
+        agentIds.some(
+          (id) => typeof id !== 'string' || id.trim().length === 0 || id !== id.trim(),
+        ) ||
+        new Set(agentIds).size !== agentIds.length
+      ) {
+        return fail(
+          'INVALID_REQUEST',
+          400,
+          'config.agentIds must be a non-empty array of unique, non-empty strings',
+        );
+      }
+
+      const {
+        model: languageModel,
+        apiKey: resolvedApiKey,
+        providerId,
+        modelInfo,
+        thinkingConfig: resolvedThinkingConfig,
+      } = await resolveModel({
+        modelString: body.model,
+        stage: 'chat-adapter',
+        apiKey: body.apiKey,
+        baseUrl: body.baseUrl,
+        providerType: body.providerType,
+        // Let resolveModel arbitrate thinking too: a routed chat-adapter's thinking
+        // wins, an unrouted one honors this client thinking (see resolve-model.ts).
+        thinkingConfig: body.thinkingConfig ?? body.thinking,
+      });
+
+      if (isProviderKeyRequired(providerId) && !resolvedApiKey) {
+        return fail('MISSING_API_KEY', 401, 'API Key is required');
+      }
+
+      const agentConfigs = resolveAgentConfigs(body);
+      const resolvedAgentIds = new Set(agentConfigs.map((agent) => agent.id));
+      const unresolvedAgentIds = agentIds.filter((id) => !resolvedAgentIds.has(id));
+      if (unresolvedAgentIds.length > 0) {
+        return fail(
+          'INVALID_REQUEST',
+          400,
+          `Unknown classroom agents in config.agentIds: ${unresolvedAgentIds.join(', ')}`,
+        );
+      }
+      if (agentConfigs.length === 0) {
+        return fail(
+          'INVALID_REQUEST',
+          400,
+          `No valid classroom agents found for config.agentIds: ${body.config.agentIds.join(', ')}`,
+        );
+      }
+
+      const signal = req.signal;
+      const abortController = new AbortController();
+      signal.addEventListener('abort', () => abortController.abort(), { once: true });
+
+      const { readable, writable } = new TransformStream();
+      const writer = writable.getWriter();
+
+      const send: SendEvent = async (event) => {
+        await writer.write(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+      };
+
+      const thinkingConfig: ThinkingConfig = resolvedThinkingConfig ?? {
+        mode: 'disabled',
+        enabled: false,
+      };
+
+      const maxAgentTurns = getPiMaxAgentTurns(body);
+      const maxActionsPerAgent = getPiMaxActionsPerAgent(body);
+      const enableWhiteboardTools = body.config.piEnableWhiteboardTools === true;
+      const childRuntimeMode = isPiNativeChildRuntimeEnabled() ? 'native' : 'legacy';
+      const enableNativeChildSpotlight = isPiNativeChildSpotlightEnabled();
+      const requestStartStageId = body.storeState.stage?.id;
+      const validRequestStartStageId =
+        typeof requestStartStageId === 'string' &&
+        requestStartStageId.length > 0 &&
+        requestStartStageId === requestStartStageId.trim()
+          ? requestStartStageId
+          : undefined;
+      const nativeWhiteboardRequested = agentConfigs.some((agent) =>
+        hasNativeWhiteboardAction(agent.allowedActions),
+      );
+      let nativeWhiteboardService: ReturnType<typeof createWhiteboardRuntimeService> | undefined;
+      let nativeWhiteboardLearnerKey: string | undefined;
+      if (
+        childRuntimeMode === 'native' &&
+        enableWhiteboardTools &&
+        nativeWhiteboardRequested &&
+        validRequestStartStageId &&
+        process.env.NEXT_PUBLIC_PERSISTENCE === '1' &&
+        process.env.DATABASE_URL &&
+        process.env.PERSISTENCE_DEV_TOKEN
+      ) {
+        const principal = authenticatePersistenceHeaders(req.headers);
+        const learnerKey = principal?.learnerKey;
+        if (learnerKey && learnerKey === learnerKey.trim()) {
+          try {
+            const provider = await getServerPersistenceProvider(process.env.DATABASE_URL);
+            nativeWhiteboardLearnerKey = learnerKey;
+            nativeWhiteboardService = createWhiteboardRuntimeService({
+              store: provider.runtimeStore,
+              resolveLearnerKey: () => learnerKey,
+            });
+          } catch {
+            log.warn('Native whiteboard capability unavailable: persistence initialization failed');
+          }
+        }
+      }
+      let nativeWebSearchConfig: ReturnType<typeof resolveClassroomWebSearchConfig>;
+      try {
+        nativeWebSearchConfig =
+          childRuntimeMode === 'native'
+            ? resolveClassroomWebSearchConfig({
+                webSearchProviderId: body.webSearchProviderId,
+                webSearchApiKey: body.webSearchApiKey,
+                webSearchBaseUrl: body.webSearchBaseUrl,
+                webSearchModelId: body.webSearchModelId,
+                baiduSubSources: body.baiduSubSources,
+              })
+            : undefined;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Invalid Web Search configuration';
+        return fail('INVALID_REQUEST', 400, message);
+      }
+
+      log.info(
+        `Pi request agents=${body.config.agentIds.join(', ')} messages=${body.messages.length} maxAgentTurns=${maxAgentTurns}`,
+      );
+
+      (async () => {
+        let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+        const startHeartbeat = () => {
+          heartbeatTimer = setInterval(() => {
+            writer.write(encoder.encode(`:heartbeat\n\n`)).catch(() => stopHeartbeat());
+          }, 15_000);
+        };
+        const stopHeartbeat = () => {
+          if (heartbeatTimer) {
+            clearInterval(heartbeatTimer);
+            heartbeatTimer = null;
+          }
+        };
+
+        try {
+          startHeartbeat();
+
+          await runPiDirectorLoop({
+            body,
+            elementReference,
+            interactiveStateNote,
+            agentConfigs,
+            send,
+            languageModel,
+            thinkingConfig,
+            maxOutputTokens: modelInfo?.outputWindow,
+            contextWindow: modelInfo?.contextWindow,
+            abortSignal: abortController.signal,
+            signal,
+            maxAgentTurns,
+            maxActionsPerAgent,
+            enableWhiteboardTools,
+            childRuntimeMode,
+            enableNativeChildSpotlight,
+            nativeWebSearchConfig,
+            nativeWhiteboardService,
+            nativeWhiteboardStageId: nativeWhiteboardService ? validRequestStartStageId : undefined,
+            nativeWhiteboardLearnerKey,
+            requestStartManualVisibilityRevision:
+              Number.isSafeInteger(body.storeState.whiteboardManualVisibilityRevision) &&
+              (body.storeState.whiteboardManualVisibilityRevision ?? -1) >= 0
+                ? body.storeState.whiteboardManualVisibilityRevision
+                : 0,
+          });
+
+          if (signal.aborted) {
+            stopHeartbeat();
+            await writer.close();
+            return;
+          }
+
           stopHeartbeat();
           await writer.close();
-          return;
-        }
+        } catch (error) {
+          stopHeartbeat();
 
-        stopHeartbeat();
-        await writer.close();
-      } catch (error) {
-        stopHeartbeat();
+          if (signal.aborted) {
+            try {
+              await writer.close();
+            } catch {
+              /* already closed */
+            }
+            return;
+          }
 
-        if (signal.aborted) {
+          log.error('Pi chat stream error:', error);
           try {
+            await send({
+              type: 'error',
+              data: { message: error instanceof Error ? error.message : String(error) },
+            });
             await writer.close();
           } catch {
-            /* already closed */
+            /* writer may already be closed */
           }
-          return;
         }
+      })();
 
-        log.error('Pi chat stream error:', error);
-        try {
-          await send({
-            type: 'error',
-            data: { message: error instanceof Error ? error.message : String(error) },
-          });
-          await writer.close();
-        } catch {
-          /* writer may already be closed */
-        }
-      }
-    })();
-
-    return new Response(readable, {
-      headers: {
-        'Content-Type': 'text/event-stream',
-        'Cache-Control': 'no-cache',
-        Connection: 'keep-alive',
-        ...(elementReference ? { [ELEMENT_REFERENCE_ACCEPTED_HEADER]: '1' } : {}),
-      },
-    });
-  } catch (error) {
-    log.error(
-      `Pi chat request failed [model=${chatModel ?? 'unknown'}, messages=${chatMessageCount ?? 0}]:`,
-      error,
-    );
-    return apiError(
-      'INTERNAL_ERROR',
-      500,
-      error instanceof Error ? error.message : 'Failed to process request',
-    );
-  }
+      const streamResponse = new Response(readable, {
+        headers: {
+          'Content-Type': 'text/event-stream',
+          'Cache-Control': 'no-cache',
+          Connection: 'keep-alive',
+          ...(elementReference ? { [ELEMENT_REFERENCE_ACCEPTED_HEADER]: '1' } : {}),
+        },
+      });
+      for (const [key, value] of responseHeaders) streamResponse.headers.append(key, value);
+      return streamResponse;
+    } catch (error) {
+      log.error(
+        `Pi chat request failed [model=${chatModel ?? 'unknown'}, messages=${chatMessageCount ?? 0}]:`,
+        error,
+      );
+      return fail(
+        'INTERNAL_ERROR',
+        500,
+        error instanceof Error ? error.message : 'Failed to process request',
+      );
+    }
+  });
 }

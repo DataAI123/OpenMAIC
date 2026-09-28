@@ -153,6 +153,7 @@ import {
 import { useTreeDrag, type DragKind } from './use-tree-drag';
 import { PaneFoldButton } from './PaneFoldButton';
 import { deleteWorkspaceSession } from '@/lib/workbench/workspace-actions';
+import { isLoginRequiredError, redirectToLogin } from '@/lib/auth/client-login';
 import { apiRenameStage, StageRenameError, STAGE_NAME_MAX_LENGTH } from '@/lib/live/server-api';
 import { SESSION_TITLE_MAX_LENGTH, workbenchSessionTitle } from '@/lib/workbench/session-title';
 import {
@@ -457,7 +458,11 @@ export function WorkspaceRail({
         // pane and URL param now (not optimistically — a failed delete must
         // leave everything exactly where it was, with the row restored).
         onSessionDeleted(sessionId);
-      } catch {
+      } catch (cause: unknown) {
+        if (isLoginRequiredError(cause)) {
+          redirectToLogin();
+          return;
+        }
         setDeletedSessionIds((current) => {
           const next = new Set(current);
           next.delete(sessionId);

@@ -1,4 +1,9 @@
 {
+  "auth": {
+    "denied": "Đăng nhập đã bị hủy hoặc không được phép.",
+    "failed": "Không thể hoàn tất đăng nhập. Vui lòng thử lại.",
+    "unavailable": "Dịch vụ xác thực tạm thời không khả dụng. Vui lòng thử lại sau."
+  },
   "common": {
     "you": "Bạn",
     "confirm": "Xác nhận",

@@ -11,6 +11,7 @@ import { Toaster } from '@/components/ui/sonner';
 import { ServerProvidersInit } from '@/components/server-providers-init';
 import { StorageHealthNotice } from '@/components/storage-health-notice';
 import { AccessCodeGuard } from '@/components/access-code-guard';
+import { AuthSessionNotice } from '@/components/auth-session-notice';
 import { ProSwapWatcher } from '@/components/workbench/ProSwapWatcher';
 
 // The UI font is loaded from @fontsource's stylesheet rather than next/font,
@@ -48,6 +49,7 @@ export default function RootLayout({
         <ThemeProvider>
           <I18nProvider>
             <ServerProvidersInit />
+            <AuthSessionNotice />
             <ProSwapWatcher />
             <AccessCodeGuard>{children}</AccessCodeGuard>
             <Toaster position="top-center" />

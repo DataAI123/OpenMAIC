@@ -42,10 +42,11 @@ function courseDocument(id: string, name = 'Agent course') {
   };
 }
 
-function ownerStore(pool: PGlitePool, ownerId: string) {
+function ownerStore(pool: PGlitePool, ownerId: string, enforceOwnerReads = false) {
   return createOwnerBoundDocumentStore({
     pool,
     ownerId,
+    enforceOwnerReads,
     validateScene: validateAppScene,
     validateStage: validateAppStage,
   });
@@ -152,6 +153,25 @@ describe('reference-fidelity stage access', () => {
       stages: [expect.objectContaining({ id: stageId })],
     });
     await expect(visitorList.json()).resolves.toEqual({ stages: [] });
+  });
+
+  it('enforces owner-or-public reads when enabled while preserving owner-only writes', async () => {
+    await import('@/lib/persistence/server-provider').then(({ getServerPersistenceProvider }) =>
+      getServerPersistenceProvider(process.env.DATABASE_URL!, () => pool as never),
+    );
+    const stageId = 'stage-strict-read-policy';
+    const owner = ownerStore(pool, `anon:${ownerCookie}`);
+    const stranger = ownerStore(pool, `anon:${visitorCookie}`, true);
+    await owner.saveDocument(courseDocument(stageId));
+
+    await expect(stranger.loadDocument(stageId)).resolves.toBeNull();
+    await pool.query('UPDATE stage_meta SET is_public = true WHERE stage_id = $1', [stageId]);
+    await expect(stranger.loadDocument(stageId)).resolves.toMatchObject({
+      stage: { id: stageId },
+    });
+    await expect(
+      stranger.saveDocument(courseDocument(stageId, 'Foreign edit')),
+    ).rejects.toBeInstanceOf(StageAccessError);
   });
 
   it('tombstones deletions and permanently retires the stage id', async () => {

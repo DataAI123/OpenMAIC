@@ -11,8 +11,8 @@ export const runtime = 'nodejs';
 export async function GET(req: NextRequest) {
   if (!isAgentRuntimeConfigured()) return new Response('Not found', { status: 404 });
 
-  return withRequestOwnerId(req, async (ownerId, responseHeaders) => {
-    const store = await getAgentSessionStore();
+  return withRequestOwnerId(req, async (ownerId, responseHeaders, identity) => {
+    const store = await getAgentSessionStore(identity?.tenantId);
     const sessions = await store.listSessionsByOwner(ownerId);
     const statuses = Object.fromEntries(sessions.map((session) => [session.id, session.status]));
     return NextResponse.json(statuses, { headers: responseHeaders });

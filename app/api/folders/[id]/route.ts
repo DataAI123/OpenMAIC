@@ -60,10 +60,14 @@ export async function PATCH(req: NextRequest, { params }: Params) {
     );
   }
 
-  return withRequestOwnerId(req, async (ownerId, responseHeaders) => {
+  return withRequestOwnerId(req, async (ownerId, responseHeaders, identity) => {
     const { id } = await params;
     try {
-      const store = (await getOwnerScopedDocumentStore(ownerId)) as unknown as DocumentFolderStore;
+      const store = (await getOwnerScopedDocumentStore(
+        ownerId,
+        undefined,
+        identity?.tenantId,
+      )) as unknown as DocumentFolderStore;
       // Excluding itself, same case-insensitive rule as create.
       const existing = await store.listFolders();
       const clash = existing.some(
@@ -104,10 +108,14 @@ export async function DELETE(req: NextRequest, { params }: Params) {
   const modeParam = req.nextUrl.searchParams.get('mode');
   const mode: 'ungroup' | 'remove' = modeParam === 'remove' ? 'remove' : 'ungroup';
 
-  return withRequestOwnerId(req, async (ownerId, responseHeaders) => {
+  return withRequestOwnerId(req, async (ownerId, responseHeaders, identity) => {
     const { id } = await params;
     try {
-      const store = (await getOwnerScopedDocumentStore(ownerId)) as unknown as DocumentFolderStore;
+      const store = (await getOwnerScopedDocumentStore(
+        ownerId,
+        undefined,
+        identity?.tenantId,
+      )) as unknown as DocumentFolderStore;
       const result = await store.deleteFolder(id, mode);
       if (!result) {
         return jsonError(404, 'FOLDER_NOT_FOUND', 'folder not found', responseHeaders);

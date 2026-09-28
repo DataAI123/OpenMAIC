@@ -6,11 +6,15 @@ import { getAgentSessionStore } from './store';
 
 const log = createLogger('ConversationTitleTask');
 
-async function runConversationTitleTask(sessionId: string, ownerId: string): Promise<void> {
+async function runConversationTitleTask(
+  sessionId: string,
+  ownerId: string,
+  tenantId?: string,
+): Promise<void> {
   let store: Awaited<ReturnType<typeof getAgentSessionStore>>;
   let visibleUserText: string | null;
   try {
-    store = await getAgentSessionStore();
+    store = await getAgentSessionStore(tenantId);
     visibleUserText = await store.claimAutomaticSessionTitle(sessionId, ownerId);
   } catch (error) {
     log.error(`session ${sessionId}: automatic title claim failed`, error);
@@ -34,9 +38,13 @@ async function runConversationTitleTask(sessionId: string, ownerId: string): Pro
   }
 }
 
-export function scheduleConversationTitle(sessionId: string, ownerId: string): void {
+export function scheduleConversationTitle(
+  sessionId: string,
+  ownerId: string,
+  tenantId?: string,
+): void {
   try {
-    after(() => runConversationTitleTask(sessionId, ownerId));
+    after(() => runConversationTitleTask(sessionId, ownerId, tenantId));
   } catch (error) {
     log.error(`session ${sessionId}: automatic title scheduling failed`, error);
   }

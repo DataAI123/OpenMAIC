@@ -26,6 +26,7 @@ import type {
   ImageGenerationResult,
 } from '../types';
 import { aspectRatioToDimensions, IMAGE_PROVIDERS } from '../image-providers';
+import { imageProviderFetch } from '../provider-fetch';
 
 // ---------------------------------------------------------------------------
 // Logger  (matches openmaic's [TIMESTAMP] [LEVEL] [Component] format)
@@ -451,9 +452,10 @@ async function queuePrompt(
   baseUrl: string,
   workflow: Record<string, unknown>,
   clientId: string,
+  pinSsrf: boolean,
 ): Promise<string> {
   log.info(`Submitting workflow to queue [client_id: ${clientId}]`);
-  const response = await fetch(`${baseUrl}/prompt`, {
+  const response = await imageProviderFetch({ pinSsrfConnections: pinSsrf }, `${baseUrl}/prompt`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ prompt: workflow, client_id: clientId }),
@@ -477,13 +479,21 @@ async function queuePrompt(
   return data.prompt_id;
 }
 
-async function pollHistory(baseUrl: string, promptId: string): Promise<HistoryEntry | null> {
+async function pollHistory(
+  baseUrl: string,
+  promptId: string,
+  pinSsrf: boolean,
+): Promise<HistoryEntry | null> {
   // A single poll timing out or blipping must not abort the whole generation —
   // return null so the caller's loop simply tries again on the next interval.
   try {
-    const response = await fetch(`${baseUrl}/history/${promptId}`, {
-      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-    });
+    const response = await imageProviderFetch(
+      { pinSsrfConnections: pinSsrf },
+      `${baseUrl}/history/${promptId}`,
+      {
+        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+      },
+    );
     if (!response.ok) return null;
     const data = (await response.json()) as Record<string, HistoryEntry>;
     return data[promptId] ?? null;
@@ -498,11 +508,16 @@ async function fetchImageAsBase64(
   filename: string,
   subfolder: string,
   type: string,
+  pinSsrf: boolean,
 ): Promise<string> {
   const params = new URLSearchParams({ filename, subfolder, type });
-  const response = await fetch(`${baseUrl}/view?${params.toString()}`, {
-    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-  });
+  const response = await imageProviderFetch(
+    { pinSsrfConnections: pinSsrf },
+    `${baseUrl}/view?${params.toString()}`,
+    {
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    },
+  );
 
   if (!response.ok) {
     throw new Error(`ComfyUI /view failed (${response.status}) for image "${filename}"`);
@@ -565,6 +580,7 @@ export async function generateWithComfyuiImage(
 ): Promise<ImageGenerationResult> {
   const baseUrl = (config.baseUrl || DEFAULT_BASE_URL).replace(/\/$/, '');
   const comfyConfig = config as ComfyUIImageGenerationConfig;
+  const pinSsrf = config.pinSsrfConnections === true;
 
   log.info(`Starting image generation [baseUrl: ${baseUrl}] [model: ${config.model ?? 'default'}]`);
   log.info(`Prompt: "${options.prompt.slice(0, 120)}${options.prompt.length > 120 ? '…' : ''}"`);
@@ -588,7 +604,7 @@ export async function generateWithComfyuiImage(
   const clientId = `openmaic-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
   // 3. Submit to the queue ---------------------------------------------------
-  const promptId = await queuePrompt(baseUrl, workflow, clientId);
+  const promptId = await queuePrompt(baseUrl, workflow, clientId, pinSsrf);
 
   // 4. Poll history until complete -------------------------------------------
   const deadline = Date.now() + GENERATION_TIMEOUT_MS;
@@ -599,7 +615,7 @@ export async function generateWithComfyuiImage(
   while (Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
     pollCount++;
-    entry = await pollHistory(baseUrl, promptId);
+    entry = await pollHistory(baseUrl, promptId, pinSsrf);
 
     // Fail fast on a runtime execution error. A workflow that errors mid-run
     // records completed:false with status_str:"error", so without this check
@@ -664,6 +680,7 @@ export async function generateWithComfyuiImage(
     imageInfo.filename,
     imageInfo.subfolder,
     imageInfo.type,
+    pinSsrf,
   );
 
   const totalMs = Date.now() - startTime;

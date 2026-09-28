@@ -10,10 +10,12 @@
 
 import { Readable } from 'stream';
 import Client, * as $Docmind from '@alicloud/docmind-api20220711';
-import { Config } from '@alicloud/openapi-client';
+import GatewayPop from '@alicloud/gateway-pop';
+import { $OpenApiUtil } from '@alicloud/openapi-core';
 import { RuntimeOptions } from '@alicloud/tea-util';
 import { createLogger } from '@/lib/logger';
 import { ALIDOCMIND_DEFAULT_BASE } from '@/lib/pdf/constants';
+import { createPinnedAliDocMindVerificationClient } from '@/lib/pdf/alidocmind-verification-client';
 
 const log = createLogger('AliDocMind');
 
@@ -77,13 +79,24 @@ function resolveCredentials(creds: Partial<AliDocMindCredentials>): AliDocMindCr
   return { accessKeyId, accessKeySecret, endpoint };
 }
 
-function createClient(creds: AliDocMindCredentials): Client {
-  const config = new Config({
+function createClient(
+  creds: AliDocMindCredentials,
+  configureVerificationTransport = false,
+): Client {
+  const config = new $OpenApiUtil.Config({
     accessKeyId: creds.accessKeyId,
     accessKeySecret: creds.accessKeySecret,
     endpoint: creds.endpoint,
+    ...(configureVerificationTransport ? { signatureVersion: 'v4' } : {}),
   });
-  return new Client(config);
+  const client = new Client(config);
+  if (configureVerificationTransport) {
+    // The generated DocMind SDK routes endpoint resolution through this product
+    // id but does not initialize the inherited field used by GatewayPop signing.
+    client._productId = 'docmind-api';
+    client.setGatewayClient(new GatewayPop());
+  }
+  return client;
 }
 
 function inferExtension(fileName: string, explicit?: string): string {
@@ -264,9 +277,10 @@ async function fetchResult(client: Client, jobId: string): Promise<Record<string
  */
 export async function verifyAliDocMindCredentials(
   creds: Partial<AliDocMindCredentials>,
+  options: { allowLocalNetworks?: boolean; allowCustomPort?: boolean } = {},
 ): Promise<{ ok: true } | { ok: false; error: string }> {
   const resolved = resolveCredentials(creds);
-  const client = createClient(resolved);
+  const client = createPinnedAliDocMindVerificationClient(createClient(resolved, true), options);
   try {
     const res = await client.queryDocParserStatus(
       new $Docmind.QueryDocParserStatusRequest({ id: 'verify-connection-probe' }),

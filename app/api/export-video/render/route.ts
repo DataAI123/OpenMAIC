@@ -4,6 +4,9 @@ import { proxyFetch } from '@/lib/server/proxy-fetch';
 import { resolveRenderServiceUrl } from '@/lib/server/render-service';
 import { capBodyStream } from '@/lib/server/capped-stream';
 import { clientIdentity } from '@/lib/server/client-identity';
+import { withRequestOwnerId } from '@/lib/server/agent-runtime/with-owner';
+import { attachOwnerHeaders } from '@/lib/server/export-render-access';
+import { isSafeRenderJobId, recordRenderJobOwner } from '@/lib/server/export-render-jobs';
 import { createLogger } from '@/lib/logger';
 
 const log = createLogger('ExportVideo Render API');
@@ -26,6 +29,12 @@ const SUBMIT_TIMEOUT_MS = 300_000;
  * to the render service (no `formData()` buffering here) and relays its
  * `202 { jobId }`. Returns 501 when the service is not configured so the client
  * can degrade to a local ZIP download.
+ *
+ * The returned jobId is bound to the caller before it is advertised: the render
+ * service itself has no owner concept, so the app records the (job → owner)
+ * mapping that poll/cancel/download later enforce. If that binding cannot be
+ * written, the just-created job is best-effort cancelled and the request fails
+ * closed — an unbound job must never reach a client.
  */
 export async function POST(req: NextRequest) {
   const resolved = resolveRenderServiceUrl();
@@ -42,56 +51,105 @@ export async function POST(req: NextRequest) {
     return apiError('INVALID_REQUEST', 413, 'Export archive is too large');
   }
 
-  const contentType = req.headers.get('content-type') ?? '';
-  if (!contentType.includes('multipart/form-data') || !req.body) {
-    return apiError('INVALID_REQUEST', 400, 'Expected multipart/form-data');
-  }
-
-  // Forward the raw multipart body verbatim, bounded to MAX_UPLOAD_BYTES of
-  // actual bytes. We deliberately do NOT parse it: the render service derives
-  // identity from the header below and ignores any multipart `userId`, so
-  // there's nothing to strip — and re-parsing would defeat the streaming bound.
-  const capped = capBodyStream(req.body, MAX_UPLOAD_BYTES);
-
-  try {
-    // Long enough for the upload of a multi-MB ZIP; the render is async.
-    const upstream = await proxyFetch(`${resolved.url}/render`, {
-      method: 'POST',
-      body: capped.stream,
-      // duplex is required to send a streaming request body via fetch.
-      duplex: 'half',
-      headers: {
-        'content-type': contentType,
-        'x-openmaic-client': clientIdentity(req),
-      },
-      signal: AbortSignal.timeout(SUBMIT_TIMEOUT_MS),
-    } as RequestInit);
-
-    const data = (await upstream.json().catch(() => ({}))) as Record<string, unknown>;
-    if (!upstream.ok) {
-      const detail = typeof data.error === 'string' ? data.error : upstream.statusText;
-      const status = upstream.status === 429 ? 429 : upstream.status === 413 ? 413 : 502;
-      const code =
-        upstream.status === 429
-          ? 'RATE_LIMITED'
-          : upstream.status === 413
-            ? 'INVALID_REQUEST'
-            : 'UPSTREAM_ERROR';
-      return apiError(code, status, 'Render service rejected the request', detail);
+  return withRequestOwnerId(req, async (ownerId, responseHeaders) => {
+    const contentType = req.headers.get('content-type') ?? '';
+    if (!contentType.includes('multipart/form-data') || !req.body) {
+      return attachOwnerHeaders(
+        apiError('INVALID_REQUEST', 400, 'Expected multipart/form-data'),
+        responseHeaders,
+      );
     }
 
-    return apiSuccess({ jobId: data.jobId, pollIntervalMs: 3000 }, 202);
-  } catch (error) {
-    // A cap trip aborts the forwarded stream, surfacing here as a fetch error.
-    if (capped.exceeded()) {
-      return apiError('INVALID_REQUEST', 413, 'Export archive is too large');
+    // Forward the raw multipart body verbatim, bounded to MAX_UPLOAD_BYTES of
+    // actual bytes. We deliberately do NOT parse it: the render service derives
+    // its per-IP rate-limit identity from the header below and ignores any
+    // multipart `userId`, so there's nothing to strip — and re-parsing would
+    // defeat the streaming bound.
+    const capped = capBodyStream(req.body, MAX_UPLOAD_BYTES);
+
+    try {
+      // Long enough for the upload of a multi-MB ZIP; the render is async.
+      const upstream = await proxyFetch(`${resolved.url}/render`, {
+        method: 'POST',
+        body: capped.stream,
+        // duplex is required to send a streaming request body via fetch.
+        duplex: 'half',
+        headers: {
+          'content-type': contentType,
+          'x-openmaic-client': clientIdentity(req),
+        },
+        signal: AbortSignal.timeout(SUBMIT_TIMEOUT_MS),
+      } as RequestInit);
+
+      const data = (await upstream.json().catch(() => ({}))) as Record<string, unknown>;
+      if (!upstream.ok) {
+        const detail = typeof data.error === 'string' ? data.error : upstream.statusText;
+        const status = upstream.status === 429 ? 429 : upstream.status === 413 ? 413 : 502;
+        const code =
+          upstream.status === 429
+            ? 'RATE_LIMITED'
+            : upstream.status === 413
+              ? 'INVALID_REQUEST'
+              : 'UPSTREAM_ERROR';
+        return attachOwnerHeaders(
+          apiError(code, status, 'Render service rejected the request', detail),
+          responseHeaders,
+        );
+      }
+
+      const jobId = data.jobId;
+      if (!isSafeRenderJobId(jobId)) {
+        // The service handed back a job id we cannot bind; refuse rather than
+        // advertise an unattributable job, and try to reclaim it upstream.
+        log.error('Render service returned an unusable job id; discarding job');
+        await cancelUpstreamJob(resolved.url, String(jobId ?? ''));
+        return attachOwnerHeaders(
+          apiError('UPSTREAM_ERROR', 502, 'Render service returned an invalid job id'),
+          responseHeaders,
+        );
+      }
+
+      try {
+        await recordRenderJobOwner(jobId, ownerId);
+      } catch (error) {
+        // Ownership binding is mandatory and fail-closed: a job the app cannot
+        // attribute must not be handed to the client. Best-effort cancel it.
+        log.error(`Failed to bind render job ${jobId} to its owner; cancelling:`, error);
+        await cancelUpstreamJob(resolved.url, jobId);
+        return attachOwnerHeaders(
+          apiError('UPSTREAM_ERROR', 503, 'Render job could not be registered'),
+          responseHeaders,
+        );
+      }
+
+      return attachOwnerHeaders(apiSuccess({ jobId, pollIntervalMs: 3000 }, 202), responseHeaders);
+    } catch (error) {
+      // A cap trip aborts the forwarded stream, surfacing here as a fetch error.
+      if (capped.exceeded()) {
+        return attachOwnerHeaders(
+          apiError('INVALID_REQUEST', 413, 'Export archive is too large'),
+          responseHeaders,
+        );
+      }
+      log.error('Failed to submit render job:', error);
+      return attachOwnerHeaders(
+        apiError(
+          'UPSTREAM_ERROR',
+          502,
+          'Failed to reach render service',
+          error instanceof Error ? error.message : String(error),
+        ),
+        responseHeaders,
+      );
     }
-    log.error('Failed to submit render job:', error);
-    return apiError(
-      'UPSTREAM_ERROR',
-      502,
-      'Failed to reach render service',
-      error instanceof Error ? error.message : String(error),
-    );
-  }
+  });
+}
+
+/** Best-effort upstream cancel so a job we refuse to bind does not linger. */
+async function cancelUpstreamJob(baseUrl: string, jobId: string): Promise<void> {
+  if (!jobId) return;
+  await proxyFetch(`${baseUrl}/render/${encodeURIComponent(jobId)}`, {
+    method: 'DELETE',
+    signal: AbortSignal.timeout(15_000),
+  }).catch(() => undefined);
 }

@@ -61,6 +61,7 @@ export async function decideDocumentAccess(
   readMeta: StageMetaReader,
   documentExists: DocumentExistenceReader,
   rereadMeta: StageMetaReader = readMeta,
+  enforceOwnerReads = false,
 ): Promise<DocumentAccess> {
   if (!ownerId) return 'forbid';
   switch (action.kind) {
@@ -70,7 +71,10 @@ export async function decideDocumentAccess(
     case 'read': {
       const meta = await readMeta(action.stageId);
       if (!meta) return 'not-found';
-      return meta.deletedAt === null ? 'allow' : 'not-found';
+      if (meta.deletedAt !== null) return 'not-found';
+      return meta.ownerId === ownerId || meta.isPublic || !enforceOwnerReads
+        ? 'allow'
+        : 'not-found';
     }
     case 'write': {
       const meta = await readMeta(action.stageId);

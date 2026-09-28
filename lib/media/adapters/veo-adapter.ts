@@ -29,6 +29,7 @@ import type {
 } from '../types';
 import { runPolledTask, type TerminalResult } from '../polled-task';
 import { requireModel } from '../require-model';
+import { videoProviderFetch } from '../provider-fetch';
 
 const DEFAULT_MODEL = 'veo-3.0-generate-001';
 const DEFAULT_BASE_URL = 'https://generativelanguage.googleapis.com';
@@ -121,6 +122,7 @@ async function submitVideoGeneration(
   apiKey: string,
   model: string,
   options: VideoGenerationOptions,
+  pinSsrf: boolean,
 ): Promise<VeoOperation> {
   const url = `${baseUrl}/v1beta/models/${model}:predictLongRunning`;
 
@@ -136,7 +138,7 @@ async function submitVideoGeneration(
     body.parameters = parameters;
   }
 
-  const response = await fetch(url, {
+  const response = await videoProviderFetch({ pinSsrfConnections: pinSsrf }, url, {
     method: 'POST',
     headers: apiHeaders(apiKey),
     body: JSON.stringify(body),
@@ -159,10 +161,11 @@ async function pollOperation(
   apiKey: string,
   model: string,
   operationName: string,
+  pinSsrf: boolean,
 ): Promise<VeoOperation> {
   const url = `${baseUrl}/v1beta/models/${model}:fetchPredictOperation`;
 
-  const response = await fetch(url, {
+  const response = await videoProviderFetch({ pinSsrfConnections: pinSsrf }, url, {
     method: 'POST',
     headers: apiHeaders(apiKey),
     body: JSON.stringify({ operationName }),
@@ -240,10 +243,17 @@ export async function generateWithVeo(
 ): Promise<VideoGenerationResult> {
   const model = requireModel(config.model, 'Veo');
   const baseUrl = config.baseUrl || DEFAULT_BASE_URL;
+  const pinSsrf = config.pinSsrfConnections === true;
 
   return runPolledTask<VideoGenerationResult>({
     submit: async () => {
-      const operation = await submitVideoGeneration(baseUrl, config.apiKey, model, options);
+      const operation = await submitVideoGeneration(
+        baseUrl,
+        config.apiKey,
+        model,
+        options,
+        pinSsrf,
+      );
       if (!operation.name) {
         throw new Error('Veo returned operation without name');
       }
@@ -252,7 +262,7 @@ export async function generateWithVeo(
         : { status: 'submitted', taskId: operation.name };
     },
     poll: async (operationName) => {
-      const operation = await pollOperation(baseUrl, config.apiKey, model, operationName);
+      const operation = await pollOperation(baseUrl, config.apiKey, model, operationName, pinSsrf);
       return operation.done ? resolveCompletedOperation(operation, options) : { status: 'pending' };
     },
     intervalMs: POLL_INTERVAL_MS,

@@ -124,6 +124,8 @@ export interface AgentSessionEntryStorageOpenOptions {
   sessionId: string;
   workerId: string;
   attempt: number;
+  /** Tenant scope resolved server-side; absent in legacy anonymous mode. */
+  tenantId?: string;
 }
 
 function translateStorageError(error: unknown): never {
@@ -169,7 +171,7 @@ export class AgentSessionEntryStorage implements SessionStorage<SessionMetadata>
   static async open(
     options: AgentSessionEntryStorageOpenOptions,
   ): Promise<AgentSessionEntryStorage> {
-    const store = await getAgentSessionStore();
+    const store = await getAgentSessionStore(options.tenantId);
     const session = await store.getSession(options.sessionId);
     if (!session) {
       throw new SessionError('not_found', `Session not found: ${options.sessionId}`);

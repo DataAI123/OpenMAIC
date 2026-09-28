@@ -52,6 +52,8 @@ export async function resolveModel(params: {
   baseUrl?: string;
   providerType?: string;
   thinkingConfig?: ThinkingConfig;
+  /** Optional caller-owned transport for endpoints with stricter network policy. */
+  fetchImpl?: typeof fetch;
 }): Promise<ResolvedModel> {
   // Resolution order: stage route > x-model > DEFAULT_MODEL.
   // A configured stage route is the operator's deliberate per-stage choice and
@@ -125,7 +127,7 @@ export async function resolveModel(params: {
     providerType: clientProviderType as ProviderType | undefined,
     // Re-validate every redirect hop of the outbound request (see
     // fetchWithRedirectValidation); the base URL above is checked at origin.
-    fetchImpl: fetchWithRedirectValidation,
+    fetchImpl: params.fetchImpl ?? fetchWithRedirectValidation,
   });
 
   // Thinking arbitration mirrors model routing — the route carries a full

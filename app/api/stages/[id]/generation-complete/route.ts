@@ -25,16 +25,12 @@ export async function POST(req: NextRequest, { params }: Params) {
     try {
       const access = await resolveStageAccess(stageId);
 
-      // Absent and tombstoned are the same 404 — the caller must not learn
-      // that an id used to be a real course, and a deleted course has no
-      // state left worth repairing.
-      if (!access) {
+      // No existence oracle: absent, tombstoned, and foreign stages all answer
+      // the same 404. The caller must not learn that an id used to be a real
+      // course, nor that one exists under someone else's owner — and a deleted
+      // course has no state left worth repairing.
+      if (!access || access.ownerId !== ownerId) {
         return NextResponse.json({ error: 'not_found' }, { status: 404, headers: responseHeaders });
-      }
-
-      // Owner only.
-      if (access.ownerId !== ownerId) {
-        return NextResponse.json({ error: 'forbidden' }, { status: 403, headers: responseHeaders });
       }
 
       const db = await getStageAccessDb();

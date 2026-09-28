@@ -77,6 +77,13 @@ export interface AgentSessionLease {
 export interface AgentSessionMeta {
   id: string;
   ownerId: string;
+  /**
+   * The tenant the session belongs to. Present only when the session was
+   * written by a tenant-scoped store; legacy (anonymous) sessions carry no
+   * tenant and are addressed by owner alone. Never taken from request input —
+   * the store stamps it from its own `tenantScope`.
+   */
+  tenantId?: string;
   prompt: string;
   title?: string;
   /** The immutable stage with which the conversation was created. */

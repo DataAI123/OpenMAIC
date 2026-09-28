@@ -174,16 +174,33 @@ describe('POST /api/stages/[id]/generation-complete', () => {
     await expect(response.json()).resolves.toEqual({ ok: true });
   });
 
-  it('forbids a visitor', async () => {
+  it('answers a foreign owner with the same 404 as a missing course (no existence oracle)', async () => {
     mocks.accessRow!.meta_owner_id = 'someone-else';
-    const response = await postGenerationComplete(
+    const foreign = await postGenerationComplete(
       new NextRequest(`http://localhost/api/stages/${STAGE_ID}/generation-complete`, {
         method: 'POST',
       }),
       params(STAGE_ID),
     );
-    expect(response.status).toBe(403);
-    await expect(response.json()).resolves.toEqual({ error: 'forbidden' });
+    expect(foreign.status).toBe(404);
+    await expect(foreign.json()).resolves.toEqual({ error: 'not_found' });
+
+    mocks.accessRow = {
+      meta_owner_id: null,
+      meta_is_public: false,
+      meta_published_at: null,
+      meta_generation_complete: false,
+      meta_deleted_at: null,
+      document_name: null,
+    };
+    const missing = await postGenerationComplete(
+      new NextRequest(`http://localhost/api/stages/${STAGE_ID}/generation-complete`, {
+        method: 'POST',
+      }),
+      params(STAGE_ID),
+    );
+    expect(missing.status).toBe(404);
+    await expect(missing.json()).resolves.toEqual({ error: 'not_found' });
   });
 });
 
@@ -218,5 +235,25 @@ describe('POST /api/stages/[id]/publish and unpublish', () => {
     );
     expect(response.status).toBe(401);
     await expect(response.json()).resolves.toEqual({ error: 'login_required' });
+  });
+
+  it('answers a foreign owner with 404 not_found, never a distinguishable 403 (publish + unpublish)', async () => {
+    mocks.accessRow!.meta_owner_id = 'someone-else';
+    mocks.accessRow!.meta_is_public = true;
+    mocks.accessRow!.meta_published_at = 1_700_000_000_000;
+
+    const publish = await postPublish(
+      new NextRequest(`http://localhost/api/stages/${STAGE_ID}/publish`, { method: 'POST' }),
+      params(STAGE_ID),
+    );
+    expect(publish.status).toBe(404);
+    await expect(publish.json()).resolves.toEqual({ error: 'not_found' });
+
+    const unpublish = await postUnpublish(
+      new NextRequest(`http://localhost/api/stages/${STAGE_ID}/unpublish`, { method: 'POST' }),
+      params(STAGE_ID),
+    );
+    expect(unpublish.status).toBe(404);
+    await expect(unpublish.json()).resolves.toEqual({ error: 'not_found' });
   });
 });

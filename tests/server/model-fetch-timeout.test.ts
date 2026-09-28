@@ -9,7 +9,18 @@ function stalled(signal: AbortSignal): Promise<never> {
 }
 
 function successful() {
-  return { ok: true, status: 200, json: async () => ({ data: [{ id: 'model' }] }) };
+  return new Response(JSON.stringify({ data: [{ id: 'model' }] }), { status: 200 });
+}
+
+function stalledBody(signal: AbortSignal): Response {
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      const fail = () => controller.error(signal.reason);
+      if (signal.aborted) fail();
+      else signal.addEventListener('abort', fail, { once: true });
+    },
+  });
+  return new Response(body, { status: 200 });
 }
 
 afterEach(() => {
@@ -27,7 +38,7 @@ describe('model discovery deadlines and retries', () => {
         const signal = init.signal as AbortSignal;
         signals.push(signal);
         if (phase === 'headers') return stalled(signal);
-        return Promise.resolve({ ok: true, status: 200, json: () => stalled(signal) });
+        return Promise.resolve(stalledBody(signal));
       });
       vi.stubGlobal('fetch', fetchMock);
       const result = fetchModels('https://example.com', '').catch((error) => error);
@@ -51,7 +62,7 @@ describe('model discovery deadlines and retries', () => {
       signals.push(init.signal);
       if (signals.length === 2) return successful();
       await new Promise((resolve) => setTimeout(resolve, 10_000));
-      return { ok: true, status: 200, json: () => stalled(init.signal) };
+      return stalledBody(init.signal);
     });
     vi.stubGlobal('fetch', fetchMock);
     const result = fetchModels('https://example.com', '');
@@ -64,12 +75,22 @@ describe('model discovery deadlines and retries', () => {
 
   it('allows a slow successful body within the original 15-second allowance', async () => {
     vi.useFakeTimers();
-    const fetchMock = vi.fn(async () => ({
-      ok: true,
-      status: 200,
-      json: () =>
-        new Promise((resolve) => setTimeout(() => resolve({ data: [{ id: 'slow' }] }), 14_999)),
-    }));
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              setTimeout(() => {
+                controller.enqueue(
+                  new TextEncoder().encode(JSON.stringify({ data: [{ id: 'slow' }] })),
+                );
+                controller.close();
+              }, 14_999);
+            },
+          }),
+          { status: 200 },
+        ),
+    );
     vi.stubGlobal('fetch', fetchMock);
     const result = fetchModels('https://example.com', '');
     await vi.advanceTimersByTimeAsync(14_999);
@@ -82,11 +103,9 @@ describe('model discovery deadlines and retries', () => {
     'preserves terminal HTTP %i when its error body stalls',
     async (status) => {
       vi.useFakeTimers();
-      const fetchMock = vi.fn(async (_url, init) => ({
-        ok: false,
-        status,
-        text: () => stalled(init.signal),
-      }));
+      const fetchMock = vi.fn(
+        async (_url, _init) => new Response('ignored error body', { status }),
+      );
       vi.stubGlobal('fetch', fetchMock);
       const result = fetchModels('https://example.com', '').catch((error) => error);
       await vi.advanceTimersByTimeAsync(15_000);
@@ -108,13 +127,7 @@ describe('model discovery deadlines and retries', () => {
   });
 
   it('does not retry malformed JSON', async () => {
-    const fetchMock = vi.fn(async () => ({
-      ok: true,
-      status: 200,
-      json: async () => {
-        throw new SyntaxError('bad JSON');
-      },
-    }));
+    const fetchMock = vi.fn(async () => new Response('{bad JSON', { status: 200 }));
     vi.stubGlobal('fetch', fetchMock);
     await expect(fetchModels('https://example.com', '')).rejects.toBeInstanceOf(SyntaxError);
     expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -125,9 +138,9 @@ describe('model discovery deadlines and retries', () => {
     const fetchMock = vi.fn(async (_url, init) => {
       if (fetchMock.mock.calls.length === 1) {
         await new Promise((resolve) => setTimeout(resolve, 10_000));
-        return { ok: false, status: 404 };
+        return new Response(null, { status: 404 });
       }
-      return { ok: true, status: 200, json: () => stalled(init.signal) };
+      return stalledBody(init.signal);
     });
     vi.stubGlobal('fetch', fetchMock);
     const result = fetchModels('https://example.com/anthropic', '').catch((error) => error);

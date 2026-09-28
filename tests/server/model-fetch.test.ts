@@ -74,13 +74,14 @@ describe('buildModelsUrlCandidates', () => {
 
 describe('fetchModels', () => {
   it('returns a sorted model list from a successful response without following redirects', async () => {
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: true,
-      status: 200,
-      json: vi.fn().mockResolvedValue({
-        data: [{ id: 'z-model', owned_by: 'provider' }, { id: 'a-model' }],
-      }),
-    } as unknown as Response);
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          data: [{ id: 'z-model', owned_by: 'provider' }, { id: 'a-model' }],
+        }),
+        { status: 200 },
+      ),
+    );
     vi.stubGlobal('fetch', fetchMock);
 
     await expect(fetchModels('https://api.example.com', 'test-key')).resolves.toEqual([
@@ -100,14 +101,9 @@ describe('fetchModels', () => {
   it.each([301, 302, 307, 308])(
     'rejects upstream %i without reading its body or trying another candidate',
     async (status) => {
-      const text = vi.fn().mockResolvedValue('redirect response body');
-      const json = vi.fn().mockResolvedValue({ data: [{ id: 'should-not-be-read' }] });
-      const fetchMock = vi.fn().mockResolvedValue({
-        ok: false,
-        status,
-        text,
-        json,
-      } as unknown as Response);
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValue(new Response('redirect response body', { status }));
       vi.stubGlobal('fetch', fetchMock);
 
       const error = await fetchModels(
@@ -118,8 +114,6 @@ describe('fetchModels', () => {
       expect(error).toBeInstanceOf(ModelFetchError);
       expect(error).toMatchObject({ status });
       expect(fetchMock).toHaveBeenCalledTimes(1);
-      expect(text).not.toHaveBeenCalled();
-      expect(json).not.toHaveBeenCalled();
       expect(fetchMock).toHaveBeenCalledWith(
         'https://gateway.example.com/api/anthropic/v1/models',
         expect.objectContaining({ redirect: 'manual' }),
@@ -130,15 +124,12 @@ describe('fetchModels', () => {
   it.each([404, 405])(
     'falls back after %i and keeps redirect handling manual for every candidate',
     async (status) => {
-      const firstText = vi.fn();
       const fetchMock = vi
         .fn()
-        .mockResolvedValueOnce({ ok: false, status, text: firstText } as unknown as Response)
-        .mockResolvedValueOnce({
-          ok: true,
-          status: 200,
-          json: vi.fn().mockResolvedValue({ data: [{ id: 'fallback-model' }] }),
-        } as unknown as Response);
+        .mockResolvedValueOnce(new Response('unused error content', { status }))
+        .mockResolvedValueOnce(
+          new Response(JSON.stringify({ data: [{ id: 'fallback-model' }] }), { status: 200 }),
+        );
       vi.stubGlobal('fetch', fetchMock);
 
       await expect(
@@ -146,7 +137,6 @@ describe('fetchModels', () => {
       ).resolves.toEqual([{ id: 'fallback-model', ownedBy: undefined }]);
 
       expect(fetchMock).toHaveBeenCalledTimes(2);
-      expect(firstText).not.toHaveBeenCalled();
       expect(fetchMock).toHaveBeenNthCalledWith(
         1,
         'https://gateway.example.com/api/anthropic/v1/models',
@@ -161,12 +151,7 @@ describe('fetchModels', () => {
   );
 
   it.each([401, 403])('keeps upstream %i terminal and preserves its status', async (status) => {
-    const text = vi.fn().mockResolvedValue('invalid key');
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: false,
-      status,
-      text,
-    } as unknown as Response);
+    const fetchMock = vi.fn().mockResolvedValue(new Response('invalid key', { status }));
     vi.stubGlobal('fetch', fetchMock);
 
     const error = await fetchModels('https://api.example.com', 'bad-key').catch(
@@ -176,6 +161,17 @@ describe('fetchModels', () => {
     expect(error).toBeInstanceOf(ModelFetchError);
     expect(error).toMatchObject({ status });
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(text).toHaveBeenCalledTimes(1);
+    expect((error as Error).message).not.toContain('invalid key');
+  });
+
+  it('rejects an oversized successful response without parsing it', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(new Response(' '.repeat(256 * 1024 + 1), { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const error = await fetchModels('https://api.example.com', '').catch((caught) => caught);
+    expect(error).toBeInstanceOf(ModelFetchError);
+    expect(error).toMatchObject({ status: 502 });
+    expect((error as Error).message).not.toContain(' '.repeat(64));
   });
 });

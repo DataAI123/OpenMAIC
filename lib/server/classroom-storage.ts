@@ -15,7 +15,9 @@ const log = createLogger('ClassroomStorage');
 export const CLASSROOMS_DIR = process.env.OPENMAIC_CLASSROOMS_DIR
   ? path.resolve(process.env.OPENMAIC_CLASSROOMS_DIR)
   : path.join(process.cwd(), 'data', 'classrooms');
-export const CLASSROOM_JOBS_DIR = path.join(process.cwd(), 'data', 'classroom-jobs');
+export const CLASSROOM_JOBS_DIR = process.env.OPENMAIC_CLASSROOM_JOBS_DIR
+  ? path.resolve(process.env.OPENMAIC_CLASSROOM_JOBS_DIR)
+  : path.join(process.cwd(), 'data', 'classroom-jobs');
 
 /** Id length shared by the create route and the generation pipeline. */
 export const CLASSROOM_ID_LENGTH = 10;
@@ -136,6 +138,10 @@ export function buildRequestOrigin(req: NextRequest): string {
 
 export interface PersistedClassroomData {
   id: string;
+  /** Server-resolved identity of the creator; absent only on pre-binding files. */
+  ownerId?: string;
+  /** Enterprise tenant for the creator; currently `default` for OIDC users. */
+  tenantId?: string;
   stage: Stage;
   scenes: Scene[];
   createdAt: string;
@@ -146,6 +152,20 @@ export interface PersistedClassroomData {
    * reservation is never served as an empty classroom.
    */
   reserved?: boolean;
+}
+
+export interface ClassroomOwnership {
+  ownerId: string;
+  tenantId?: string;
+}
+
+function validateClassroomOwnership(ownership: ClassroomOwnership): void {
+  if (!ownership.ownerId || ownership.ownerId === 'public:anonymous') {
+    throw new Error('Classroom creation requires an owner');
+  }
+  if (ownership.ownerId.startsWith('user:') && !ownership.tenantId) {
+    throw new Error('Authenticated classroom creation requires a tenant');
+  }
 }
 
 export function isValidClassroomId(id: string): boolean {
@@ -193,9 +213,16 @@ export async function readClassroom(id: string): Promise<PersistedClassroomData 
  * directory. The caller owns the id and overwrites the placeholder with the
  * final document when generation completes.
  */
-export async function reserveClassroom(id: string, stage: Stage): Promise<void> {
+export async function reserveClassroom(
+  id: string,
+  stage: Stage,
+  ownership: ClassroomOwnership,
+): Promise<void> {
+  validateClassroomOwnership(ownership);
   const placeholder: PersistedClassroomData = {
     id,
+    ownerId: ownership.ownerId,
+    ...(ownership.tenantId ? { tenantId: ownership.tenantId } : {}),
     stage,
     scenes: [],
     createdAt: new Date().toISOString(),
@@ -241,14 +268,19 @@ export interface PersistClassroomOptions {
 export async function persistClassroom(
   data: {
     id: string;
+    ownerId: string;
+    tenantId?: string;
     stage: Stage;
     scenes: Scene[];
   },
   baseUrl: string,
   options: PersistClassroomOptions = {},
 ): Promise<PersistedClassroomData & { url: string }> {
+  validateClassroomOwnership(data);
   const classroomData: PersistedClassroomData = {
     id: data.id,
+    ownerId: data.ownerId,
+    ...(data.tenantId ? { tenantId: data.tenantId } : {}),
     stage: data.stage,
     scenes: data.scenes,
     createdAt: new Date().toISOString(),

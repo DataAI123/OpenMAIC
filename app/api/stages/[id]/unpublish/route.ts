@@ -29,12 +29,11 @@ export async function POST(req: NextRequest, { params }: Params) {
         );
       }
 
+      // No existence oracle: a foreign stage and an absent stage answer the
+      // same 404, so a probe cannot learn which stage ids exist.
       const access = await resolveStageAccess(stageId);
-      if (!access) {
+      if (!access || access.ownerId !== ownerId) {
         return NextResponse.json({ error: 'not_found' }, { status: 404, headers: responseHeaders });
-      }
-      if (access.ownerId !== ownerId) {
-        return NextResponse.json({ error: 'forbidden' }, { status: 403, headers: responseHeaders });
       }
 
       const db = await getStageAccessDb();

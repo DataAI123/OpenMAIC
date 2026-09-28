@@ -29,8 +29,14 @@
 import type { NextRequest } from 'next/server';
 
 import { createLogger } from '@/lib/logger';
-import { apiError } from '@/lib/server/api-response';
+import { apiError, type ApiErrorCode } from '@/lib/server/api-response';
 import { resolveModelFromRequest } from '@/lib/server/resolve-model';
+import { withRequestOwnerId } from '@/lib/server/agent-runtime/with-owner';
+import {
+  consumeActionRateLimit,
+  UserApiRateLimitExceededError,
+} from '@/lib/server/user-api-rate-limit';
+import { withOwnerResponseHeaders } from '@/lib/server/agent-runtime/route-response';
 
 import { createSSEResponse } from '@/lib/pbl/v2/api/sse';
 import {
@@ -55,77 +61,95 @@ interface EvaluateRequest {
 }
 
 export async function POST(req: NextRequest) {
-  let body: EvaluateRequest;
-  try {
-    body = (await req.json()) as EvaluateRequest;
-  } catch {
-    return apiError('INVALID_REQUEST', 400, 'Request body must be valid JSON.');
-  }
+  return withRequestOwnerId(req, async (ownerId, responseHeaders) => {
+    const fail = (code: ApiErrorCode, status: number, error: string, details?: string) =>
+      withOwnerResponseHeaders(apiError(code, status, error, details), responseHeaders);
+    try {
+      await consumeActionRateLimit(ownerId, 'pbl_v2_evaluate');
+    } catch (error) {
+      if (error instanceof UserApiRateLimitExceededError) {
+        responseHeaders.set('Retry-After', String(error.retryAfterSeconds));
+        return fail('RATE_LIMITED', 429, 'Too many evaluation requests');
+      }
+      return fail('INTERNAL_ERROR', 503, 'Rate limiting is unavailable');
+    }
+    const sse = (...args: Parameters<typeof createSSEResponse>) => {
+      const response = createSSEResponse(...args);
+      for (const [key, value] of responseHeaders) response.headers.append(key, value);
+      return response;
+    };
+    let body: EvaluateRequest;
+    try {
+      body = (await req.json()) as EvaluateRequest;
+    } catch {
+      return fail('INVALID_REQUEST', 400, 'Request body must be valid JSON.');
+    }
 
-  if (!body?.project) {
-    return apiError('MISSING_REQUIRED_FIELD', 400, '`project` is required.');
-  }
-  if (body.kind !== 'task' && body.kind !== 'milestone' && body.kind !== 'final') {
-    return apiError('INVALID_REQUEST', 400, "`kind` must be 'task' | 'milestone' | 'final'.");
-  }
-  if (body.kind === 'task' && (!body.milestoneId || !body.microtaskId)) {
-    return apiError(
-      'MISSING_REQUIRED_FIELD',
-      400,
-      "kind='task' requires both milestoneId and microtaskId.",
-    );
-  }
-  if (body.kind === 'milestone' && !body.milestoneId) {
-    return apiError('MISSING_REQUIRED_FIELD', 400, "kind='milestone' requires milestoneId.");
-  }
+    if (!body?.project) {
+      return fail('MISSING_REQUIRED_FIELD', 400, '`project` is required.');
+    }
+    if (body.kind !== 'task' && body.kind !== 'milestone' && body.kind !== 'final') {
+      return fail('INVALID_REQUEST', 400, "`kind` must be 'task' | 'milestone' | 'final'.");
+    }
+    if (body.kind === 'task' && (!body.milestoneId || !body.microtaskId)) {
+      return fail(
+        'MISSING_REQUIRED_FIELD',
+        400,
+        "kind='task' requires both milestoneId and microtaskId.",
+      );
+    }
+    if (body.kind === 'milestone' && !body.milestoneId) {
+      return fail('MISSING_REQUIRED_FIELD', 400, "kind='milestone' requires milestoneId.");
+    }
 
-  let resolved;
-  try {
-    resolved = await resolveModelFromRequest(req, body, 'pbl-v2-runtime:evaluate');
-  } catch (err) {
-    log.error('Model resolution failed:', err);
-    return apiError('INVALID_REQUEST', 400, err instanceof Error ? err.message : String(err));
-  }
-  const { model, thinkingConfig, modelInfo } = resolved;
-  const hasVision = !!modelInfo?.capabilities?.vision;
+    let resolved;
+    try {
+      resolved = await resolveModelFromRequest(req, body, 'pbl-v2-runtime:evaluate');
+    } catch (err) {
+      log.error('Model resolution failed:', err);
+      return fail('INVALID_REQUEST', 400, err instanceof Error ? err.message : String(err));
+    }
+    const { model, thinkingConfig, modelInfo } = resolved;
+    const hasVision = !!modelInfo?.capabilities?.vision;
 
-  if (body.kind === 'task') {
-    return createSSEResponse(
-      runTaskEvaluation({
+    if (body.kind === 'task') {
+      return sse(
+        runTaskEvaluation({
+          project: body.project,
+          milestoneId: body.milestoneId!,
+          microtaskId: body.microtaskId!,
+          languageModel: model,
+          thinkingConfig,
+          recentChatSummary: body.recentChatSummary,
+          hasVision,
+          signal: req.signal,
+        }),
+        { signal: req.signal },
+      );
+    }
+    if (body.kind === 'milestone') {
+      return sse(
+        runMilestoneEvaluation({
+          project: body.project,
+          milestoneId: body.milestoneId!,
+          languageModel: model,
+          thinkingConfig,
+          recentChatSummary: body.recentChatSummary,
+          signal: req.signal,
+        }),
+        { signal: req.signal },
+      );
+    }
+    // final
+    return sse(
+      runFinalEvaluation({
         project: body.project,
-        milestoneId: body.milestoneId!,
-        microtaskId: body.microtaskId!,
         languageModel: model,
         thinkingConfig,
         recentChatSummary: body.recentChatSummary,
-        hasVision,
         signal: req.signal,
       }),
       { signal: req.signal },
     );
-  }
-  if (body.kind === 'milestone') {
-    return createSSEResponse(
-      runMilestoneEvaluation({
-        project: body.project,
-        milestoneId: body.milestoneId!,
-        languageModel: model,
-        thinkingConfig,
-        recentChatSummary: body.recentChatSummary,
-        signal: req.signal,
-      }),
-      { signal: req.signal },
-    );
-  }
-  // final
-  return createSSEResponse(
-    runFinalEvaluation({
-      project: body.project,
-      languageModel: model,
-      thinkingConfig,
-      recentChatSummary: body.recentChatSummary,
-      signal: req.signal,
-    }),
-    { signal: req.signal },
-  );
+  });
 }

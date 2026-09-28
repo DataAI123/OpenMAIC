@@ -18,9 +18,9 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     return new Response('Not found', { status: 404 });
   }
 
-  return withRequestOwnerId(req, async (ownerId, responseHeaders) => {
+  return withRequestOwnerId(req, async (ownerId, responseHeaders, identity) => {
     const { id } = await params;
-    const store = await getAgentSessionStore();
+    const store = await getAgentSessionStore(identity?.tenantId);
     const meta = await store.getSession(id);
     if (!meta || meta.ownerId !== ownerId) {
       return new Response('Not found', { status: 404, headers: responseHeaders });

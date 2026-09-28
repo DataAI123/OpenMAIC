@@ -1,4 +1,9 @@
 {
+  "auth": {
+    "denied": "Se canceló el inicio de sesión o no fue autorizado.",
+    "failed": "No se pudo completar el inicio de sesión. Inténtalo de nuevo.",
+    "unavailable": "La autenticación no está disponible temporalmente. Inténtalo de nuevo más tarde."
+  },
   "common": {
     "you": "Tú",
     "confirm": "Confirmar",

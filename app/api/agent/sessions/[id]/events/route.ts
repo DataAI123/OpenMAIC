@@ -22,10 +22,10 @@
  * the stream. Native `EventSource` then reconnects with `Last-Event-ID` and
  * resumes through the same replay path without losing durable events.
  *
- * Access model: there is no per-route auth challenge. Every request is
- * granted an anonymous cookie identity, and every store read is scoped to
- * that identity. A session owned by another identity is indistinguishable
- * from a missing one — both are 404 with the same response.
+ * Access model: the shared request-owner boundary resolves a database-backed
+ * OIDC identity or a legacy anonymous cookie. The session row must match that
+ * owner before the event log is read. A foreign or missing session answers
+ * the same 404.
  *
  * This handler is a pure READER of the store. A disconnect closes this
  * reader and nothing else: the runner keeps running, and its events keep
@@ -37,7 +37,7 @@ import type { NextRequest } from 'next/server';
 import { HOST_AGENT_LIFECYCLE as LIFECYCLE } from '@/lib/agent-runtime/lifecycle';
 import { isAgentRuntimeConfigured } from '@/lib/config/feature-flags';
 import { subscribeAgentEventWakeup } from '@/lib/server/agent-runtime/event-notify-bus';
-import { resolveRequestOwnerId } from '@/lib/server/agent-runtime/owner';
+import { resolveRequestOwnerIdForRequest } from '@/lib/server/agent-runtime/with-owner';
 import { getAgentSessionStore } from '@/lib/server/agent-runtime/store';
 
 export const runtime = 'nodejs';
@@ -64,18 +64,15 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
     return new Response('Not found', { status: 404 });
   }
   const { id } = await params;
-  const responseHeaders = new Headers();
-  // The identity cookie is minted for the requester regardless of the target
-  // session, and the owner is resolved before the session lookup: a request
+  const ownerResolution = await resolveRequestOwnerIdForRequest(req);
+  if ('response' in ownerResolution) return ownerResolution.response;
+  const { ownerId, tenantId, responseHeaders } = ownerResolution;
+  // The identity is resolved before the session lookup: a request
   // for a missing session and one for a session owned by someone else return
-  // byte-identical 404s (same status, body, and cookie headers), so the
-  // response cannot be used to probe whether a session UUID exists. This
-  // slice resolves only the anonymous cookie identity; a future auth
-  // integration must thread `authenticatedOwnerId` through here, or sessions
-  // created under authenticated identities would be unreachable by their own
-  // owner.
-  const ownerId = resolveRequestOwnerId(req, responseHeaders);
-  const store = await getAgentSessionStore();
+  // the same 404 body and status, so the response cannot be used to probe
+  // whether a session UUID exists. Legacy requests may receive a newly minted
+  // anonymous cookie; OIDC requests use the verified application session.
+  const store = await getAgentSessionStore(tenantId);
   const meta = await store.getSession(id);
   if (!meta) {
     return new Response('Not found', { status: 404, headers: responseHeaders });

@@ -9,13 +9,21 @@ import type {
 import {
   CLASSROOM_JOBS_DIR,
   ensureClassroomJobsDir,
+  writeJsonFileExclusive,
   writeJsonFileAtomic,
 } from '@/lib/server/classroom-storage';
 
 export type ClassroomGenerationJobStatus = 'queued' | 'running' | 'succeeded' | 'failed';
 
+export interface ClassroomGenerationJobIdentity {
+  ownerId: string;
+  tenantId?: string;
+}
+
 export interface ClassroomGenerationJob {
   id: string;
+  ownerId: string;
+  tenantId?: string;
   status: ClassroomGenerationJobStatus;
   step: ClassroomGenerationStep | 'queued' | 'failed';
   progress: number;
@@ -97,13 +105,27 @@ export function isValidClassroomJobId(jobId: string): boolean {
   return /^[a-zA-Z0-9_-]+$/.test(jobId);
 }
 
+function validateJobIdentity(identity: ClassroomGenerationJobIdentity): void {
+  if (!identity.ownerId || identity.ownerId === 'public:anonymous') {
+    throw new Error('Classroom generation job requires an owner');
+  }
+  if (identity.ownerId.startsWith('user:') && !identity.tenantId) {
+    throw new Error('Authenticated classroom generation job requires a tenant');
+  }
+}
+
 export async function createClassroomGenerationJob(
   jobId: string,
   input: GenerateClassroomInput,
+  identity: ClassroomGenerationJobIdentity,
 ): Promise<ClassroomGenerationJob> {
+  if (!isValidClassroomJobId(jobId)) throw new Error('Invalid classroom generation job id');
+  validateJobIdentity(identity);
   const now = new Date().toISOString();
   const job: ClassroomGenerationJob = {
     id: jobId,
+    ownerId: identity.ownerId,
+    ...(identity.tenantId ? { tenantId: identity.tenantId } : {}),
     status: 'queued',
     step: 'queued',
     progress: 0,
@@ -115,16 +137,18 @@ export async function createClassroomGenerationJob(
   };
 
   await ensureClassroomJobsDir();
-  await writeJsonFileAtomic(jobFilePath(jobId), job);
+  await writeJsonFileExclusive(jobFilePath(jobId), job);
   return job;
 }
 
 export async function readClassroomGenerationJob(
   jobId: string,
+  identity: ClassroomGenerationJobIdentity,
 ): Promise<ClassroomGenerationJob | null> {
   try {
     const content = await fs.readFile(jobFilePath(jobId), 'utf-8');
     const job = JSON.parse(content) as ClassroomGenerationJob;
+    if (job.ownerId !== identity.ownerId || job.tenantId !== identity.tenantId) return null;
     return markStaleIfNeeded(job);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
@@ -136,17 +160,22 @@ export async function readClassroomGenerationJob(
 
 export async function updateClassroomGenerationJob(
   jobId: string,
-  patch: Partial<ClassroomGenerationJob>,
+  identity: ClassroomGenerationJobIdentity,
+  patch: Partial<Omit<ClassroomGenerationJob, 'id' | 'ownerId' | 'tenantId'>>,
 ): Promise<ClassroomGenerationJob> {
+  validateJobIdentity(identity);
   return withJobLock(jobId, async () => {
-    const existing = await readClassroomGenerationJob(jobId);
+    const existing = await readClassroomGenerationJob(jobId, identity);
     if (!existing) {
-      throw new Error(`Classroom generation job not found: ${jobId}`);
+      throw new Error('Classroom generation job owner mismatch');
     }
 
     const updated: ClassroomGenerationJob = {
       ...existing,
       ...patch,
+      id: existing.id,
+      ownerId: existing.ownerId,
+      tenantId: existing.tenantId,
       updatedAt: new Date().toISOString(),
     };
 
@@ -157,11 +186,13 @@ export async function updateClassroomGenerationJob(
 
 export async function markClassroomGenerationJobRunning(
   jobId: string,
+  identity: ClassroomGenerationJobIdentity,
 ): Promise<ClassroomGenerationJob> {
+  validateJobIdentity(identity);
   return withJobLock(jobId, async () => {
-    const existing = await readClassroomGenerationJob(jobId);
+    const existing = await readClassroomGenerationJob(jobId, identity);
     if (!existing) {
-      throw new Error(`Classroom generation job not found: ${jobId}`);
+      throw new Error('Classroom generation job owner mismatch');
     }
 
     const updated: ClassroomGenerationJob = {
@@ -179,9 +210,10 @@ export async function markClassroomGenerationJobRunning(
 
 export async function updateClassroomGenerationJobProgress(
   jobId: string,
+  identity: ClassroomGenerationJobIdentity,
   progress: ClassroomGenerationProgress,
 ): Promise<ClassroomGenerationJob> {
-  return updateClassroomGenerationJob(jobId, {
+  return updateClassroomGenerationJob(jobId, identity, {
     status: 'running',
     step: progress.step,
     progress: progress.progress,
@@ -193,9 +225,10 @@ export async function updateClassroomGenerationJobProgress(
 
 export async function markClassroomGenerationJobSucceeded(
   jobId: string,
+  identity: ClassroomGenerationJobIdentity,
   result: GenerateClassroomResult,
 ): Promise<ClassroomGenerationJob> {
-  return updateClassroomGenerationJob(jobId, {
+  return updateClassroomGenerationJob(jobId, identity, {
     status: 'succeeded',
     step: 'completed',
     progress: 100,
@@ -212,9 +245,10 @@ export async function markClassroomGenerationJobSucceeded(
 
 export async function markClassroomGenerationJobFailed(
   jobId: string,
+  identity: ClassroomGenerationJobIdentity,
   error: string,
 ): Promise<ClassroomGenerationJob> {
-  return updateClassroomGenerationJob(jobId, {
+  return updateClassroomGenerationJob(jobId, identity, {
     status: 'failed',
     step: 'failed',
     message: 'Classroom generation failed',

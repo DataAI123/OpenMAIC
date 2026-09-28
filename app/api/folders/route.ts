@@ -5,11 +5,11 @@
  * Dexie tables).
  *
  * Every handler is owner-scoped exactly like the other workbench routes: the
- * owner resolves from the anonymous cookie (`withRequestOwnerId`) and is never
- * a request parameter, and all reads and writes go through the owner-bound
- * document store (`getOwnerScopedDocumentStore`), the same seam the runner
- * binds for the stage tools. A folder created here is visible to this browser
- * and to nobody else.
+ * owner resolves from the verified OIDC session or legacy anonymous cookie
+ * (`withRequestOwnerId`) and is never a request parameter. Reads and writes go
+ * through the owner-bound document store (`getOwnerScopedDocumentStore`), the
+ * same seam the runner binds for the stage tools. A folder is visible only to
+ * its resolved owner.
  *
  * Name validation is the shared display-width rule (full-width = 2, half-width
  * = 1, ≤ 40) from `lib/utils/folder-name-validation.ts` — the same module the
@@ -52,9 +52,13 @@ function jsonError(status: number, code: string, message: string, headers?: Head
 export async function GET(req: NextRequest) {
   if (!isAgentRuntimeConfigured()) return new Response('Not found', { status: 404 });
 
-  return withRequestOwnerId(req, async (ownerId, responseHeaders) => {
+  return withRequestOwnerId(req, async (ownerId, responseHeaders, identity) => {
     try {
-      const store = (await getOwnerScopedDocumentStore(ownerId)) as unknown as DocumentFolderStore;
+      const store = (await getOwnerScopedDocumentStore(
+        ownerId,
+        undefined,
+        identity?.tenantId,
+      )) as unknown as DocumentFolderStore;
       const folders = await listFoldersForOwner(store);
       return ownerJson(
         { folders: folders.map((folder) => folderResponse(folder, ownerId)) },
@@ -96,9 +100,13 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  return withRequestOwnerId(req, async (ownerId, responseHeaders) => {
+  return withRequestOwnerId(req, async (ownerId, responseHeaders, identity) => {
     try {
-      const store = (await getOwnerScopedDocumentStore(ownerId)) as unknown as DocumentFolderStore;
+      const store = (await getOwnerScopedDocumentStore(
+        ownerId,
+        undefined,
+        identity?.tenantId,
+      )) as unknown as DocumentFolderStore;
       const { folder } = await createFolderForOwner(store, trimmed, { reuseExisting: false });
       return ownerJson({ folder: folderResponse(folder, ownerId) }, 200, responseHeaders);
     } catch (error) {

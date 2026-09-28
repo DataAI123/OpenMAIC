@@ -34,6 +34,7 @@ import type {
 } from '../types';
 import { probeAuth } from '../probe-auth';
 import { runPolledTask } from '../polled-task';
+import { videoProviderFetch } from '../provider-fetch';
 import { requireModel } from '../require-model';
 
 const DEFAULT_BASE_URL = 'https://ark.cn-beijing.volces.com';
@@ -160,14 +161,18 @@ export async function submitSeedanceTask(
   const resolution = toSeedanceResolution(options.resolution);
   if (resolution) body.resolution = resolution;
 
-  const response = await fetch(`${resolveArkRoot(baseUrl)}/contents/generations/tasks`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${config.apiKey}`,
+  const response = await videoProviderFetch(
+    config,
+    `${resolveArkRoot(baseUrl)}/contents/generations/tasks`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${config.apiKey}`,
+      },
+      body: JSON.stringify(body),
     },
-    body: JSON.stringify(body),
-  });
+  );
 
   if (!response.ok) {
     const text = await response.text();
@@ -193,12 +198,16 @@ export async function pollSeedanceTask(
 ): Promise<VideoGenerationResult | null> {
   const baseUrl = config.baseUrl || DEFAULT_BASE_URL;
 
-  const response = await fetch(`${resolveArkRoot(baseUrl)}/contents/generations/tasks/${taskId}`, {
-    method: 'GET',
-    headers: {
-      Authorization: `Bearer ${config.apiKey}`,
+  const response = await videoProviderFetch(
+    config,
+    `${resolveArkRoot(baseUrl)}/contents/generations/tasks/${taskId}`,
+    {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${config.apiKey}`,
+      },
     },
-  });
+  );
 
   if (!response.ok) {
     const text = await response.text();

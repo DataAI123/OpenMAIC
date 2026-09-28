@@ -33,7 +33,9 @@ import {
   generateWithOpenRouterImage,
   testOpenRouterImageConnectivity,
   OPENROUTER_DEFAULT_BASE_URL,
+  OPENROUTER_IMAGE_KEY_PROBE,
 } from './adapters/openrouter-image-adapter';
+import type { ProviderKeyProbe } from './provider-key-probe';
 
 export const IMAGE_PROVIDERS: Record<ImageProviderId, ImageProviderConfig> = {
   seedream: {
@@ -206,6 +208,22 @@ export async function testImageConnectivity(
         success: false,
         message: `Unsupported image provider: ${config.providerId}`,
       };
+  }
+}
+
+/**
+ * The BYOK key probe for a provider that can verify a key without generating,
+ * or `undefined` for every provider whose only probe would spend the user's
+ * credits. Takes an untrusted header value: an unknown id is simply not
+ * probeable. Capability routes resolve this instead of naming a vendor, so the
+ * vendor half stays on the adapter.
+ */
+export function resolveImageKeyProbe(providerId: string): ProviderKeyProbe | undefined {
+  switch (providerId) {
+    case 'openrouter-image':
+      return OPENROUTER_IMAGE_KEY_PROBE;
+    default:
+      return undefined;
   }
 }
 

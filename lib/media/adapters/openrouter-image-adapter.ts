@@ -24,6 +24,12 @@ import type {
   ImageGenerationResult,
 } from '../types';
 import { requireModel } from '../require-model';
+import { imageProviderFetch } from '../provider-fetch';
+import type {
+  ProviderKeyProbe,
+  ProviderKeyProbeInput,
+  ProviderKeyProbeResult,
+} from '../provider-key-probe';
 
 export const OPENROUTER_DEFAULT_BASE_URL = 'https://openrouter.ai/api/v1';
 
@@ -125,14 +131,19 @@ export async function generateWithOpenRouterImage(
   // `aspect_ratio` accepts our four ratios verbatim; omit it and the model decides.
   if (options.aspectRatio) body.aspect_ratio = options.aspectRatio;
 
-  const response = await fetch(`${baseUrl}/images`, {
-    method: 'POST',
-    headers: openRouterHeaders(config.apiKey),
-    // Never let a redirect carry the Authorization header to another host.
-    redirect: 'manual',
-    body: JSON.stringify(body),
-    ...(options.signal ? { signal: options.signal } : {}),
-  });
+  const response = await imageProviderFetch(
+    config,
+    `${baseUrl}/images`,
+    {
+      method: 'POST',
+      headers: openRouterHeaders(config.apiKey),
+      // Never let a redirect carry the Authorization header to another host.
+      redirect: 'manual',
+      body: JSON.stringify(body),
+      ...(options.signal ? { signal: options.signal } : {}),
+    },
+    { rejectRedirects: true },
+  );
 
   if (!response.ok) {
     const text = await response.text();
@@ -166,3 +177,108 @@ export async function generateWithOpenRouterImage(
     height: options.height || height,
   };
 }
+
+// ============================================================================
+// BYOK key probe (shared by the image and video capability routes)
+// ============================================================================
+
+/**
+ * The fixed, read-only endpoint the probe may touch. One key covers every
+ * hosted model, so a single key-metadata read verifies it — no request here can
+ * spend the user's credits.
+ */
+const KEY_ENDPOINT = `${OPENROUTER_DEFAULT_BASE_URL}/key`;
+
+const MAX_PROBE_BASE_URL_LENGTH = 128;
+
+/**
+ * The only base URL form a client may claim for the key probe.
+ *
+ * The probe never dials this value — it always calls {@link KEY_ENDPOINT} — but
+ * accepting an arbitrary `x-base-url` would let the settings UI report a host
+ * as verified that the probe never talked to. A missing header is fine: the
+ * probe does not depend on it.
+ */
+export function isCanonicalOpenRouterBaseUrl(headerValue: string | null): boolean {
+  if (headerValue === null) return true;
+  if (!headerValue.trim() || headerValue.length > MAX_PROBE_BASE_URL_LENGTH) return false;
+
+  try {
+    const url = new URL(headerValue);
+    return (
+      url.protocol === 'https:' &&
+      url.hostname === 'openrouter.ai' &&
+      !url.port &&
+      !url.username &&
+      !url.password &&
+      (url.pathname === '/api/v1' || url.pathname === '/api/v1/') &&
+      !url.search &&
+      !url.hash
+    );
+  } catch {
+    return false;
+  }
+}
+
+/** Operator-facing copy, kept apart so the two modalities can word it differently. */
+export interface OpenRouterKeyProbeCopy {
+  readonly connected: string;
+  readonly invalidKey: string;
+  readonly failed: string;
+}
+
+async function discardResponseBody(response: Response): Promise<void> {
+  await response.body?.cancel().catch(() => undefined);
+}
+
+/**
+ * Read the key's own metadata. Deliberately NOT the `/models` catalog: that
+ * answers 200 unauthenticated, so probing it would report success for an
+ * invalid key. The body is dropped on every path — `GET /key` answers key usage
+ * metadata, which is not the caller's to read.
+ *
+ * A thrown request is an upstream error rather than a re-throw: the caller maps
+ * outcomes onto one HTTP response, so a network failure and a `5xx` must not
+ * take different paths through it.
+ */
+export async function probeOpenRouterKey(
+  input: ProviderKeyProbeInput,
+  copy: OpenRouterKeyProbeCopy,
+): Promise<ProviderKeyProbeResult> {
+  let response: Response;
+  try {
+    response = await input.transport.fetch(KEY_ENDPOINT, {
+      method: 'GET',
+      redirect: 'manual',
+      headers: { Authorization: `Bearer ${input.apiKey}` },
+      signal: input.signal,
+    });
+  } catch {
+    return { outcome: 'upstream-error', message: copy.failed };
+  }
+
+  if (response.status >= 300 && response.status < 400) {
+    await discardResponseBody(response);
+    return { outcome: 'redirect', message: copy.failed };
+  }
+  await discardResponseBody(response);
+  if (response.status === 401 || response.status === 403) {
+    return { outcome: 'invalid-key', message: copy.invalidKey };
+  }
+  if (!response.ok) return { outcome: 'upstream-error', message: copy.failed };
+  return { outcome: 'ok', message: copy.connected };
+}
+
+const IMAGE_KEY_PROBE_COPY: OpenRouterKeyProbeCopy = {
+  connected: 'Connected to OpenRouter Image',
+  invalidKey: 'OpenRouter API key is invalid',
+  failed: 'OpenRouter image verification failed',
+};
+
+/** The key probe the image capability route resolves for this provider. */
+export const OPENROUTER_IMAGE_KEY_PROBE: ProviderKeyProbe = {
+  missingKeyMessage: 'An OpenRouter API key is required',
+  rejectedBaseUrlMessage: 'OpenRouter base URL is not allowed',
+  isBaseUrlAllowed: isCanonicalOpenRouterBaseUrl,
+  probe: (input) => probeOpenRouterKey(input, IMAGE_KEY_PROBE_COPY),
+};

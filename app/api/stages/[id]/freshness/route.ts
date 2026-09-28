@@ -25,7 +25,7 @@
 import type { NextRequest } from 'next/server';
 
 import { isAgentRuntimeConfigured } from '@/lib/config/feature-flags';
-import { resolveRequestOwnerId } from '@/lib/server/agent-runtime/owner';
+import { resolveRequestOwnerIdForRequest } from '@/lib/server/agent-runtime/with-owner';
 import { getOwnerScopedDocumentStore } from '@/lib/server/agent-runtime/owner-scoped-documents';
 import { ownerNotFound } from '@/lib/server/agent-runtime/route-response';
 
@@ -46,14 +46,15 @@ type Params = { params: Promise<{ id: string }> };
 export async function GET(req: NextRequest, { params }: Params) {
   if (!isAgentRuntimeConfigured()) return new Response('Not found', { status: 404 });
 
-  const responseHeaders = new Headers();
-  const ownerId = resolveRequestOwnerId(req, responseHeaders);
+  const ownerResolution = await resolveRequestOwnerIdForRequest(req);
+  if ('response' in ownerResolution) return ownerResolution.response;
+  const { ownerId, tenantId, responseHeaders } = ownerResolution;
   const { id: stageId } = await params;
 
   // Existence-gated, exactly like the manifest route: the owner-bound store
   // reads a foreign or missing stage as absent, and the 404 carries the
   // owner cookie the same way every response of this family does.
-  const store = await getOwnerScopedDocumentStore(ownerId);
+  const store = await getOwnerScopedDocumentStore(ownerId, undefined, tenantId);
   const initial = await store.readFreshnessManifest(stageId);
   if (!initial) return ownerNotFound(responseHeaders);
 

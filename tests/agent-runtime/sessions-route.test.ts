@@ -13,6 +13,7 @@ const mocks = vi.hoisted(() => ({
   findSkill: vi.fn(),
   inferSkillIdFromPrompt: vi.fn(),
   scheduleConversationTitle: vi.fn(),
+  resolveStageAccess: vi.fn(),
 }));
 
 vi.mock('@/lib/config/feature-flags', () => ({
@@ -45,6 +46,9 @@ vi.mock('@/lib/server/agent-runtime/session-materials', () => ({
 }));
 vi.mock('@/lib/server/agent-runtime/conversation-title-task', () => ({
   scheduleConversationTitle: mocks.scheduleConversationTitle,
+}));
+vi.mock('@/lib/server/stage-access', () => ({
+  resolveStageAccess: mocks.resolveStageAccess,
 }));
 
 import { GET, POST } from '@/app/api/agent/sessions/route';
@@ -89,6 +93,7 @@ beforeEach(() => {
   mocks.postUserMessage.mockResolvedValue({ seq: 1, delivery: 'queued', requeued: true });
   mocks.softDeleteSession.mockResolvedValue(true);
   mocks.bindOwnerMaterialsToSession.mockResolvedValue([]);
+  mocks.resolveStageAccess.mockResolvedValue({ ownerId: 'anon:test' });
 });
 
 describe('agent session collection route', () => {
@@ -107,7 +112,7 @@ describe('agent session collection route', () => {
         origin: 'http://localhost',
       }),
     );
-    expect(mocks.scheduleConversationTitle).toHaveBeenCalledWith('session-1', 'anon:test');
+    expect(mocks.scheduleConversationTitle).toHaveBeenCalledWith('session-1', 'anon:test', undefined);
   });
 
   it('does not schedule an ordinary session until its create write resolves', async () => {
@@ -133,7 +138,7 @@ describe('agent session collection route', () => {
       status: 'queued',
     });
     expect((await responsePromise).status).toBe(202);
-    expect(mocks.scheduleConversationTitle).toHaveBeenCalledWith('session-1', 'anon:test');
+    expect(mocks.scheduleConversationTitle).toHaveBeenCalledWith('session-1', 'anon:test', undefined);
   });
 
   it('accepts a skill by its user-visible name and freezes the durable id, like the runner', async () => {
@@ -159,7 +164,7 @@ describe('agent session collection route', () => {
       { text: 'Compare this', courseRefs },
       { expectedOwnerId: 'anon:test' },
     );
-    expect(mocks.scheduleConversationTitle).toHaveBeenCalledWith('session-1', 'anon:test');
+    expect(mocks.scheduleConversationTitle).toHaveBeenCalledWith('session-1', 'anon:test', undefined);
     await expect(response.json()).resolves.toMatchObject({
       id: 'session-1',
       status: 'queued',
@@ -259,7 +264,7 @@ describe('agent session collection route', () => {
     expect(mocks.createSession).not.toHaveBeenCalled();
   });
 
-  it('creates an idle existing-course session without a stage access dependency', async () => {
+  it('creates an idle existing-course session only for a course owned by the caller', async () => {
     const response = await post({ existingCourse: true, stageId: 'stage-1' });
 
     expect(response.status).toBe(202);
@@ -272,7 +277,20 @@ describe('agent session collection route', () => {
         status: 'succeeded',
       }),
     );
+    expect(mocks.resolveStageAccess).toHaveBeenCalledWith('stage-1');
     expect(mocks.scheduleConversationTitle).not.toHaveBeenCalled();
+  });
+
+  it('does not create an existing-course session for a foreign, public, or missing course', async () => {
+    mocks.resolveStageAccess.mockResolvedValueOnce({ ownerId: 'user:another' });
+    expect((await post({ existingCourse: true, stageId: 'stage-1' })).status).toBe(404);
+
+    mocks.resolveStageAccess.mockResolvedValueOnce({ ownerId: 'public-owner', isPublic: true });
+    expect((await post({ existingCourse: true, stageId: 'stage-1' })).status).toBe(404);
+
+    mocks.resolveStageAccess.mockResolvedValueOnce(null);
+    expect((await post({ existingCourse: true, stageId: 'stage-1' })).status).toBe(404);
+    expect(mocks.createSession).not.toHaveBeenCalled();
   });
 
   it('persists empty opening text instead of a synthetic Stage id for existing-course refs', async () => {
@@ -305,7 +323,7 @@ describe('agent session collection route', () => {
       { text: 'Compare this lesson', courseRefs },
       { expectedOwnerId: 'anon:test' },
     );
-    expect(mocks.scheduleConversationTitle).toHaveBeenCalledWith('session-1', 'anon:test');
+    expect(mocks.scheduleConversationTitle).toHaveBeenCalledWith('session-1', 'anon:test', undefined);
     expect(mocks.postUserMessage.mock.invocationCallOrder[0]).toBeLessThan(
       mocks.scheduleConversationTitle.mock.invocationCallOrder[0]!,
     );

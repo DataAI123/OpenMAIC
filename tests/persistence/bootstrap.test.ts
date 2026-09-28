@@ -38,6 +38,18 @@ describe('persistence client bootstrap', () => {
     vi.stubEnv('NEXT_PUBLIC_PERSISTENCE_TOKEN', 'test-dev-token');
     vi.stubGlobal('window', {});
     vi.stubGlobal('localStorage', memoryStorage());
+    // This test runs in Node while emulating a browser bootstrap. Browser
+    // fetch resolves the relative auth URL against the current page; Node
+    // fetch does not, so provide the legacy session response explicitly.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({ mode: 'legacy', status: 'anonymous' }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+      ),
+    );
 
     const { HttpAssetStore, HttpDocumentStore } = await import('@openmaic/storage');
     const { HttpRuntimeStore } = await import('@openmaic/storage/runtime/http');

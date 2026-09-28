@@ -1,5 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { NextRequest } from 'next/server';
+import { DocumentNotFoundError } from '@openmaic/storage';
+
+import { StageAccessError } from '@/lib/persistence/stage-meta';
 
 import { createFakeDocumentStore } from './_fake-document-store';
 
@@ -256,6 +259,58 @@ describe('POST /api/folders/members', () => {
     expect(response.status).toBe(400);
     await expect(response.json()).resolves.toMatchObject({
       error: { code: 'MISSING_STAGE_ID' },
+    });
+  });
+
+  it('returns a plain 404 (no existence oracle) for a foreign stage', async () => {
+    await mocks.fakeStore!.store.createFolder('folder-a', 'Math');
+    vi.spyOn(mocks.fakeStore!.store, 'setStageFolder').mockRejectedValue(
+      new StageAccessError('stage-victim', 'owner-1', 'foreign'),
+    );
+    const response = await post({ stageId: 'stage-victim', folderId: 'folder-a' });
+    expect(response.status).toBe(404);
+    expect(response.headers.get('content-type') ?? '').not.toMatch(/json/);
+    await expect(response.text()).resolves.toBe('Not found');
+  });
+
+  it('gives a foreign stage the byte-identical response as an absent stage', async () => {
+    await mocks.fakeStore!.store.createFolder('folder-a', 'Math');
+    const spy = vi.spyOn(mocks.fakeStore!.store, 'setStageFolder');
+
+    spy.mockRejectedValue(new StageAccessError('stage-victim', 'owner-1', 'foreign'));
+    const foreign = await post({ stageId: 'stage-victim', folderId: 'folder-a' });
+    const foreignBody = await foreign.text();
+
+    spy.mockRejectedValue(new StageAccessError('stage-none', 'owner-1', 'unclaimed'));
+    const absent = await post({ stageId: 'stage-none', folderId: 'folder-a' });
+    const absentBody = await absent.text();
+
+    expect(foreign.status).toBe(404);
+    expect(absent.status).toBe(404);
+    // Same status AND same body means probing cannot tell a foreign course from
+    // a non-existent one.
+    expect(foreignBody).toBe(absentBody);
+  });
+
+  it('maps a bare DocumentNotFoundError (soft-referenced stage gone) to the same 404', async () => {
+    await mocks.fakeStore!.store.createFolder('folder-a', 'Math');
+    vi.spyOn(mocks.fakeStore!.store, 'setStageFolder').mockRejectedValue(
+      new DocumentNotFoundError('stage-deleted', '@openmaic/storage: document not found'),
+    );
+    const response = await post({ stageId: 'stage-deleted', folderId: 'folder-a' });
+    expect(response.status).toBe(404);
+    await expect(response.text()).resolves.toBe('Not found');
+  });
+
+  it('still reports a genuine store failure as 500', async () => {
+    await mocks.fakeStore!.store.createFolder('folder-a', 'Math');
+    vi.spyOn(mocks.fakeStore!.store, 'setStageFolder').mockRejectedValue(
+      new Error('connection reset'),
+    );
+    const response = await post({ stageId: 'stage-1', folderId: 'folder-a' });
+    expect(response.status).toBe(500);
+    await expect(response.json()).resolves.toMatchObject({
+      error: { code: 'FOLDER_MEMBER_FAILED' },
     });
   });
 });

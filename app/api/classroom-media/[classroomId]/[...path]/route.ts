@@ -4,6 +4,11 @@ import { NextRequest, NextResponse } from 'next/server';
 import { CLASSROOMS_DIR, isValidClassroomId } from '@/lib/server/classroom-storage';
 import { parseRangeHeader } from '@/lib/server/http-range';
 import { createLogger } from '@/lib/logger';
+import { readClassroom } from '@/lib/server/classroom-storage';
+import {
+  withRequestOwnerId,
+  type RequestOwnerIdentity,
+} from '@/lib/server/agent-runtime/with-owner';
 
 const log = createLogger('ClassroomMedia');
 
@@ -22,6 +27,7 @@ const MIME_TYPES: Record<string, string> = {
 };
 
 const CACHE_HEADERS = { 'Cache-Control': 'public, max-age=86400, immutable' } as const;
+const PRIVATE_CACHE_HEADERS = { 'Cache-Control': 'private, no-store' } as const;
 
 /** Bridge a fs ReadStream into a web ReadableStream, propagating errors and cancel. */
 function toWebStream(stream: ReadStream): ReadableStream {
@@ -39,7 +45,23 @@ function toWebStream(stream: ReadStream): ReadableStream {
 
 export async function GET(
   req: NextRequest,
+  context: { params: Promise<{ classroomId: string; path: string[] }> },
+) {
+  return withRequestOwnerId(req, async (ownerId, responseHeaders, identity) => {
+    const resolvedIdentity = identity ?? { ownerId };
+    const response = await handleGet(req, context, resolvedIdentity);
+    if (resolvedIdentity.ownerId.startsWith('user:')) {
+      response.headers.set('Cache-Control', PRIVATE_CACHE_HEADERS['Cache-Control']);
+    }
+    responseHeaders.forEach((value, name) => response.headers.append(name, value));
+    return response;
+  });
+}
+
+async function handleGet(
+  req: NextRequest,
   { params }: { params: Promise<{ classroomId: string; path: string[] }> },
+  identity: RequestOwnerIdentity,
 ) {
   const { classroomId, path: pathSegments } = await params;
 
@@ -59,6 +81,25 @@ export async function GET(
   if (subDir !== 'media' && subDir !== 'audio') {
     return NextResponse.json({ error: 'Invalid path' }, { status: 404 });
   }
+
+  if (identity.ownerId.startsWith('user:')) {
+    let classroom;
+    try {
+      classroom = await readClassroom(classroomId);
+    } catch (error) {
+      log.error(`Classroom ownership lookup failed [classroomId=${classroomId}]:`, error);
+      return NextResponse.json({ error: 'Internal error' }, { status: 500 });
+    }
+    if (
+      !classroom ||
+      classroom.ownerId !== identity.ownerId ||
+      classroom.tenantId !== identity.tenantId
+    ) {
+      return NextResponse.json({ error: 'Not found' }, { status: 404 });
+    }
+  }
+
+  const cacheHeaders = identity.ownerId.startsWith('user:') ? PRIVATE_CACHE_HEADERS : CACHE_HEADERS;
 
   const filePath = path.join(CLASSROOMS_DIR, classroomId, ...pathSegments);
   const resolvedBase = path.resolve(CLASSROOMS_DIR, classroomId);
@@ -99,7 +140,7 @@ export async function GET(
       return new NextResponse(toWebStream(stream), {
         status: 206,
         headers: {
-          ...CACHE_HEADERS,
+          ...cacheHeaders,
           'Content-Type': contentType,
           'Content-Length': String(range.end - range.start + 1),
           'Content-Range': `bytes ${range.start}-${range.end}/${stat.size}`,
@@ -112,7 +153,7 @@ export async function GET(
     return new NextResponse(toWebStream(createReadStream(realPath)), {
       status: 200,
       headers: {
-        ...CACHE_HEADERS,
+        ...cacheHeaders,
         'Content-Type': contentType,
         'Content-Length': String(stat.size),
         'Accept-Ranges': 'bytes',

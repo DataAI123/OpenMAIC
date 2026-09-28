@@ -23,6 +23,7 @@ import type {
 import { probeAuth } from '../probe-auth';
 import { runPolledTask } from '../polled-task';
 import { requireModel } from '../require-model';
+import { videoProviderFetch } from '../provider-fetch';
 
 const DEFAULT_MODEL = 'grok-imagine-video';
 const DEFAULT_BASE_URL = 'https://api.x.ai/v1';
@@ -109,6 +110,7 @@ async function submitVideoGeneration(
   apiKey: string,
   model: string,
   options: VideoGenerationOptions,
+  pinSsrf: boolean,
 ): Promise<string> {
   const body: Record<string, unknown> = {
     model,
@@ -117,11 +119,15 @@ async function submitVideoGeneration(
 
   if (options.duration) body.duration = options.duration;
 
-  const response = await fetch(`${baseUrl}/videos/generations`, {
-    method: 'POST',
-    headers: apiHeaders(apiKey),
-    body: JSON.stringify(body),
-  });
+  const response = await videoProviderFetch(
+    { pinSsrfConnections: pinSsrf },
+    `${baseUrl}/videos/generations`,
+    {
+      method: 'POST',
+      headers: apiHeaders(apiKey),
+      body: JSON.stringify(body),
+    },
+  );
 
   if (!response.ok) {
     const text = await response.text();
@@ -144,11 +150,16 @@ async function pollVideoStatus(
   baseUrl: string,
   apiKey: string,
   requestId: string,
+  pinSsrf: boolean,
 ): Promise<GrokVideoPollResponse> {
-  const response = await fetch(`${baseUrl}/videos/${requestId}`, {
-    method: 'GET',
-    headers: apiHeaders(apiKey),
-  });
+  const response = await videoProviderFetch(
+    { pinSsrfConnections: pinSsrf },
+    `${baseUrl}/videos/${requestId}`,
+    {
+      method: 'GET',
+      headers: apiHeaders(apiKey),
+    },
+  );
 
   if (!response.ok) {
     const text = await response.text();
@@ -168,14 +179,15 @@ export async function generateWithGrokVideo(
 ): Promise<VideoGenerationResult> {
   const model = requireModel(config.model, 'Grok Video');
   const baseUrl = config.baseUrl || DEFAULT_BASE_URL;
+  const pinSsrf = config.pinSsrfConnections === true;
 
   return runPolledTask<VideoGenerationResult>({
     submit: async () => ({
       status: 'submitted',
-      taskId: await submitVideoGeneration(baseUrl, config.apiKey, model, options),
+      taskId: await submitVideoGeneration(baseUrl, config.apiKey, model, options, pinSsrf),
     }),
     poll: async (requestId) => {
-      const result = await pollVideoStatus(baseUrl, config.apiKey, requestId);
+      const result = await pollVideoStatus(baseUrl, config.apiKey, requestId, pinSsrf);
 
       if (result.status === 'done') {
         if (!result.video?.url) {

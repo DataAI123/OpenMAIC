@@ -35,6 +35,7 @@ vi.mock('@/lib/logger', () => ({
 type StorageModule = typeof import('@/lib/server/classroom-storage');
 
 const SERVER_ID_PATTERN = /^[A-Za-z0-9_-]{10}$/;
+const TEST_OWNERSHIP = { ownerId: 'anon:storage-test' };
 
 let tmpDir: string;
 let storage: StorageModule;
@@ -91,6 +92,8 @@ describe('POST /api/classroom — create never overwrites', () => {
     const firstJson = (await first.json()) as { id: string };
     expect(first.status).toBe(201);
     expect(firstJson.id).toMatch(SERVER_ID_PATTERN);
+    const firstClassroom = await storage.readClassroom(firstJson.id);
+    expect(firstClassroom?.ownerId).toMatch(/^anon:/);
     const originalBytes = await readRaw(firstJson.id);
 
     // The second request names the incumbent id, mimicking a visitor who knows
@@ -121,7 +124,7 @@ describe('POST /api/classroom — create never overwrites', () => {
   it('exclusive persist rejects EEXIST and leaves the original byte-identical with no temp files', async () => {
     const id = 'exclusive01';
     await storage.persistClassroom(
-      { id, stage: storedStage(id, 'Original'), scenes: [] },
+      { id, ...TEST_OWNERSHIP, stage: storedStage(id, 'Original'), scenes: [] },
       'http://localhost',
       { exclusive: true },
     );
@@ -129,7 +132,7 @@ describe('POST /api/classroom — create never overwrites', () => {
 
     await expect(
       storage.persistClassroom(
-        { id, stage: storedStage(id, 'Replacement'), scenes: [] },
+        { id, ...TEST_OWNERSHIP, stage: storedStage(id, 'Replacement'), scenes: [] },
         'http://localhost',
         { exclusive: true },
       ),
@@ -184,7 +187,7 @@ describe('POST /api/classroom — create never overwrites', () => {
     const id = 'reserved01';
     const stage = storedStage(id, 'Reserved');
 
-    await storage.reserveClassroom(id, stage);
+    await storage.reserveClassroom(id, stage, TEST_OWNERSHIP);
 
     // The placeholder exists on disk (so the id is claimed) but is not served.
     const placeholder = JSON.parse(await readRaw(id)) as { reserved?: boolean };
@@ -192,13 +195,16 @@ describe('POST /api/classroom — create never overwrites', () => {
     await expect(storage.readClassroom(id)).resolves.toBeNull();
 
     // A second reservation of the same id is a collision.
-    await expect(storage.reserveClassroom(id, stage)).rejects.toMatchObject({
+    await expect(storage.reserveClassroom(id, stage, TEST_OWNERSHIP)).rejects.toMatchObject({
       name: 'ClassroomAlreadyExistsError',
       code: 'EEXIST',
     });
 
     // The final overwrite replaces the placeholder with the real document.
-    await storage.persistClassroom({ id, stage, scenes: [] }, 'http://localhost');
+    await storage.persistClassroom(
+      { id, ...TEST_OWNERSHIP, stage, scenes: [] },
+      'http://localhost',
+    );
     const stored = await storage.readClassroom(id);
     expect(stored?.stage.name).toBe('Reserved');
     expect(stored?.reserved).toBeUndefined();
@@ -208,7 +214,7 @@ describe('POST /api/classroom — create never overwrites', () => {
     const id = 'released01';
     const stage = storedStage(id, 'Abandoned');
 
-    await storage.reserveClassroom(id, stage);
+    await storage.reserveClassroom(id, stage, TEST_OWNERSHIP);
     expect(JSON.parse(await readRaw(id))).toMatchObject({ reserved: true });
     await expect(storage.readClassroom(id)).resolves.toBeNull();
 
@@ -218,13 +224,16 @@ describe('POST /api/classroom — create never overwrites', () => {
     await expect(fs.access(path.join(tmpDir, `${id}.json`))).rejects.toMatchObject({
       code: 'ENOENT',
     });
-    await expect(storage.reserveClassroom(id, stage)).resolves.toBeUndefined();
+    await expect(storage.reserveClassroom(id, stage, TEST_OWNERSHIP)).resolves.toBeUndefined();
   });
 
   it('releasing a non-reserved classroom document is a no-op', async () => {
     const id = 'persisted1';
     const stage = storedStage(id, 'Persisted');
-    await storage.persistClassroom({ id, stage, scenes: [] }, 'http://localhost');
+    await storage.persistClassroom(
+      { id, ...TEST_OWNERSHIP, stage, scenes: [] },
+      'http://localhost',
+    );
     const before = await readRaw(id);
 
     await storage.releaseClassroomReservation(id);
@@ -256,7 +265,7 @@ describe('POST /api/classroom — create never overwrites', () => {
   it('retries a colliding generated id and succeeds with a fresh one', async () => {
     const collideId = 'collide001';
     await storage.persistClassroom(
-      { id: collideId, stage: storedStage(collideId, 'Incumbent'), scenes: [] },
+      { id: collideId, ...TEST_OWNERSHIP, stage: storedStage(collideId, 'Incumbent'), scenes: [] },
       'http://localhost',
       { exclusive: true },
     );
@@ -281,7 +290,7 @@ describe('POST /api/classroom — create never overwrites', () => {
   it('returns 409 after the bounded retries are exhausted', async () => {
     const collideId = 'collide002';
     await storage.persistClassroom(
-      { id: collideId, stage: storedStage(collideId, 'Incumbent'), scenes: [] },
+      { id: collideId, ...TEST_OWNERSHIP, stage: storedStage(collideId, 'Incumbent'), scenes: [] },
       'http://localhost',
       { exclusive: true },
     );

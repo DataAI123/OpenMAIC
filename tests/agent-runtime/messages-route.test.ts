@@ -191,11 +191,11 @@ describe('POST agent session message', () => {
     expect(mocks.scheduleConversationTitle).not.toHaveBeenCalled();
   });
 
-  it('maps a transactional ownership race to forbidden', async () => {
+  it('maps a transactional ownership race to a uniform 404 (never a distinguishable 403)', async () => {
     mocks.postUserMessage.mockRejectedValue(new AgentSessionAccessError('session-1'));
 
     const response = await call({ text: 'Continue' });
-    expect(response.status).toBe(403);
+    expect(response.status).toBe(404);
     expect(response.headers.get('set-cookie')).toContain('anonymous_id=test');
     expect(mocks.scheduleConversationTitle).not.toHaveBeenCalled();
   });

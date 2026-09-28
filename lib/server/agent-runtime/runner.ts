@@ -89,6 +89,7 @@ import { listAgentUserMessages } from './user-messages';
 import { subscribeAgentEventWakeup } from './event-notify-bus';
 import { getOwnerScopedDocumentStore } from './owner-scoped-documents';
 import { assertCurrentStageMutationActive } from './mutation-fence';
+import { attributionForOwner, runWithUsageAttribution } from '@/lib/server/usage-attribution';
 import { inventorySlide } from './course-edit/apply';
 import {
   buildPersonalHistoryTools,
@@ -895,7 +896,10 @@ export async function runSession(ctx: RunContext, meta: ClaimedAgentSession): Pr
 
   let store: Awaited<ReturnType<typeof getAgentSessionStore>>;
   try {
-    store = await getAgentSessionStore();
+    // The run is scoped to the claimed session's tenant, so every later read
+    // and write on this store is confined to it. Legacy (anonymous) claims
+    // carry no tenant and keep the unscoped store.
+    store = await getAgentSessionStore(meta.tenantId);
   } catch (error) {
     ctx.running.delete(id);
     throw error;
@@ -942,7 +946,12 @@ export async function runSession(ctx: RunContext, meta: ClaimedAgentSession): Pr
   let entrySession: Session | undefined;
   const loadEntryHistory = async (): Promise<SessionEntryHistory> => {
     entrySession ??= new Session(
-      await AgentSessionEntryStorage.open({ sessionId: id, workerId: WORKER_ID, attempt }),
+      await AgentSessionEntryStorage.open({
+        sessionId: id,
+        workerId: WORKER_ID,
+        attempt,
+        tenantId: meta.tenantId,
+      }),
     );
     return loadSessionEntryHistory(entrySession, {
       sessionId: id,
@@ -1287,7 +1296,9 @@ export async function runSession(ctx: RunContext, meta: ClaimedAgentSession): Pr
     const webSearchTools = search
       ? [
           buildWebSearchTool(search, (urls) =>
-            registerSessionUrls(id, urls, 'web_search').then(() => undefined),
+            registerSessionUrls(id, urls, 'web_search', undefined, meta.tenantId).then(
+              () => undefined,
+            ),
           ),
         ]
       : [];
@@ -1307,6 +1318,7 @@ export async function runSession(ctx: RunContext, meta: ClaimedAgentSession): Pr
         await store.assertActiveLease(id, WORKER_ID, attempt, transaction);
         assertCurrentStageMutationActive();
       },
+      meta.tenantId,
     )) as CourseStore;
     // The detached media jobs' document store: same owner binding and write
     // boundary as the run's store, but fenced only by the stage-mutation
@@ -1314,9 +1326,13 @@ export async function runSession(ctx: RunContext, meta: ClaimedAgentSession): Pr
     // legitimately patches the document minutes after its run ended, when
     // the lease is already released; wiring the run's store there would make
     // every post-run patch throw AgentSessionLeaseLostError.
-    const mediaJobStore = (await getOwnerScopedDocumentStore(meta.ownerId, async () => {
-      assertCurrentStageMutationActive();
-    })) as CourseStore;
+    const mediaJobStore = (await getOwnerScopedDocumentStore(
+      meta.ownerId,
+      async () => {
+        assertCurrentStageMutationActive();
+      },
+      meta.tenantId,
+    )) as CourseStore;
     const resolveFollowUpElementContext = async (
       message: FollowUpMessage,
     ): Promise<FollowUpMessage> => {
@@ -1877,7 +1893,13 @@ export function startAgentRunner(): AgentRunnerHandle {
         // Process-local fence in addition to the store's lease exclusion.
         if (ctx.running.has(meta.id)) continue;
         log.info(`claiming ${meta.id} (attempt ${meta.attempt})`);
-        void runSession(ctx, meta).catch((error) => {
+        // Attribute every LLM/tool call this session runs to the claimed
+        // durable session's owner. The detached runner is outside the HTTP
+        // request scope, so it establishes its own usage-attribution context
+        // from `meta.ownerId` (never client input) around the whole run.
+        void runWithUsageAttribution(attributionForOwner(meta.ownerId), () =>
+          runSession(ctx, meta),
+        ).catch((error) => {
           log.error(`runSession ${meta.id} crashed`, error);
           ctx.running.delete(meta.id);
         });

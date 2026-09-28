@@ -9,8 +9,14 @@ import { NextRequest } from 'next/server';
 import { nanoid } from 'nanoid';
 import { callLLM } from '@/lib/ai/llm';
 import { createLogger } from '@/lib/logger';
-import { apiError, apiSuccess } from '@/lib/server/api-response';
+import { apiError, apiSuccess, type ApiErrorCode } from '@/lib/server/api-response';
 import { resolveModelFromRequest } from '@/lib/server/resolve-model';
+import { withRequestOwnerId } from '@/lib/server/agent-runtime/with-owner';
+import {
+  consumeActionRateLimit,
+  UserApiRateLimitExceededError,
+} from '@/lib/server/user-api-rate-limit';
+import { withOwnerResponseHeaders } from '@/lib/server/agent-runtime/route-response';
 import { AGENT_COLOR_PALETTE } from '@/lib/constants/agent-defaults';
 import { normalizeVoiceDesign } from '@/lib/audio/voice-design';
 import { isQwenCloneVoice, resolveTTSModelForVoice } from '@/lib/audio/constants';
@@ -128,95 +134,109 @@ function stripCodeFences(text: string): string {
 }
 
 export async function POST(req: NextRequest) {
-  let stageName: string | undefined;
-  let modelString: string | undefined;
-  try {
-    const body = (await req.json()) as RequestBody;
-    const {
-      stageInfo,
-      sceneOutlines,
-      languageDirective,
-      availableAvatars,
-      avatarDescriptions,
-      availableVoices,
-      narratorVoice,
-    } = body;
-    stageName = stageInfo?.name;
-
-    // ── Validate required fields ──
-    if (!stageInfo?.name) {
-      return apiError('MISSING_REQUIRED_FIELD', 400, 'stageInfo.name is required');
+  return withRequestOwnerId(req, async (ownerId, responseHeaders) => {
+    const fail = (code: ApiErrorCode, status: number, error: string, details?: string) =>
+      withOwnerResponseHeaders(apiError(code, status, error, details), responseHeaders);
+    try {
+      await consumeActionRateLimit(ownerId, 'generate_agent_profiles');
+    } catch (error) {
+      if (error instanceof UserApiRateLimitExceededError) {
+        responseHeaders.set('Retry-After', String(error.retryAfterSeconds));
+        return fail('RATE_LIMITED', 429, 'Too many profile generation requests');
+      }
+      return fail('INTERNAL_ERROR', 503, 'Rate limiting is unavailable');
     }
-    if (!languageDirective) {
-      return apiError('MISSING_REQUIRED_FIELD', 400, 'languageDirective is required');
-    }
-    if (!availableAvatars || availableAvatars.length === 0) {
-      return apiError(
-        'MISSING_REQUIRED_FIELD',
-        400,
-        'availableAvatars is required and must not be empty',
-      );
-    }
+    const done = (data: Record<string, unknown>, status = 200) =>
+      withOwnerResponseHeaders(apiSuccess(data, status), responseHeaders);
+    let stageName: string | undefined;
+    let modelString: string | undefined;
+    try {
+      const body = (await req.json()) as RequestBody;
+      const {
+        stageInfo,
+        sceneOutlines,
+        languageDirective,
+        availableAvatars,
+        avatarDescriptions,
+        availableVoices,
+        narratorVoice,
+      } = body;
+      stageName = stageInfo?.name;
 
-    // ── Model resolution from request headers/body ──
-    const {
-      model: languageModel,
-      modelString: _modelString,
-      thinkingConfig,
-    } = await resolveModelFromRequest(req, body, 'agent-profiles');
-    modelString = _modelString;
+      // ── Validate required fields ──
+      if (!stageInfo?.name) {
+        return fail('MISSING_REQUIRED_FIELD', 400, 'stageInfo.name is required');
+      }
+      if (!languageDirective) {
+        return fail('MISSING_REQUIRED_FIELD', 400, 'languageDirective is required');
+      }
+      if (!availableAvatars || availableAvatars.length === 0) {
+        return fail(
+          'MISSING_REQUIRED_FIELD',
+          400,
+          'availableAvatars is required and must not be empty',
+        );
+      }
 
-    // ── Build prompt ──
-    const sceneSummary = sceneOutlines?.length
-      ? sceneOutlines
-          .map((s, i) => `${i + 1}. ${s.title}${s.description ? ` — ${s.description}` : ''}`)
-          .join('\n')
-      : null;
+      // ── Model resolution from request headers/body ──
+      const {
+        model: languageModel,
+        modelString: _modelString,
+        thinkingConfig,
+      } = await resolveModelFromRequest(req, body, 'agent-profiles');
+      modelString = _modelString;
 
-    // The teacher must speak with the user's explicitly selected global voice
-    // whenever it is usable; otherwise keep the old behavior (LLM-assigned).
-    const narratorBinding = narratorVoice
-      ? resolveNarratorVoice(narratorVoice, availableVoices)
-      : undefined;
+      // ── Build prompt ──
+      const sceneSummary = sceneOutlines?.length
+        ? sceneOutlines
+            .map((s, i) => `${i + 1}. ${s.title}${s.description ? ` — ${s.description}` : ''}`)
+            .join('\n')
+        : null;
 
-    const systemPrompt = `You are an expert instructional designer. Generate agent profiles for a multi-agent classroom simulation. Decide the appropriate number of agents (typically 3-5) based on the course content and complexity. Return ONLY valid JSON, no markdown or explanation.`;
+      // The teacher must speak with the user's explicitly selected global voice
+      // whenever it is usable; otherwise keep the old behavior (LLM-assigned).
+      const narratorBinding = narratorVoice
+        ? resolveNarratorVoice(narratorVoice, availableVoices)
+        : undefined;
 
-    // Build voice list for prompt (if available)
-    const voiceListStr =
-      availableVoices && availableVoices.length > 0
-        ? JSON.stringify(
-            availableVoices.map((v) => ({
-              id: advertisedVoiceToken(v),
-              name: v.voiceName,
-              language: v.voiceLanguage || 'unknown',
-            })),
-          )
-        : '';
+      const systemPrompt = `You are an expert instructional designer. Generate agent profiles for a multi-agent classroom simulation. Decide the appropriate number of agents (typically 3-5) based on the course content and complexity. Return ONLY valid JSON, no markdown or explanation.`;
 
-    const voicePrompt = voiceListStr
-      ? narratorBinding
-        ? `- The teacher agent's voice is FIXED to the narrator voice "${advertisedVoiceToken(narratorBinding)}" — set by the system, so omit the "voice" field for the teacher
+      // Build voice list for prompt (if available)
+      const voiceListStr =
+        availableVoices && availableVoices.length > 0
+          ? JSON.stringify(
+              availableVoices.map((v) => ({
+                id: advertisedVoiceToken(v),
+                name: v.voiceName,
+                language: v.voiceLanguage || 'unknown',
+              })),
+            )
+          : '';
+
+      const voicePrompt = voiceListStr
+        ? narratorBinding
+          ? `- The teacher agent's voice is FIXED to the narrator voice "${advertisedVoiceToken(narratorBinding)}" — set by the system, so omit the "voice" field for the teacher
   - Every OTHER agent must still be assigned a voice from this list: ${voiceListStr}
   - Prefer a voice whose language matches the course language directive
   - Pick a voice that suits each agent's personality and role (e.g. lively voice for energetic student)
   - Try to use different voices for each non-teacher agent
   - Never assign the fixed teacher narrator voice to any other agent`
-        : `- Each agent should be assigned a voice that matches their persona from this list: ${voiceListStr}
+          : `- Each agent should be assigned a voice that matches their persona from this list: ${voiceListStr}
   - Prefer a voice whose language matches the course language directive
   - Pick a voice that suits the agent's personality and role (e.g. authoritative voice for teacher, lively voice for energetic student)
   - Try to use different voices for each agent`
-      : '';
+        : '';
 
-    // The schema example must always be an ADVERTISED token (findAdvertisedVoice
-    // only resolves advertised voices), never the narrator token — a ghost clone
-    // not in the advertised list would poison the example for non-teacher agents.
-    const voiceJsonField = voiceListStr
-      ? narratorBinding
-        ? `,\n      "voice": "string (voice id from available list, e.g. '${advertisedVoiceToken(availableVoices![0])}'; omit for the teacher — its voice is fixed)"`
-        : `,\n      "voice": "string (voice id from available list, e.g. '${advertisedVoiceToken(availableVoices![0])}')"`
-      : '';
+      // The schema example must always be an ADVERTISED token (findAdvertisedVoice
+      // only resolves advertised voices), never the narrator token — a ghost clone
+      // not in the advertised list would poison the example for non-teacher agents.
+      const voiceJsonField = voiceListStr
+        ? narratorBinding
+          ? `,\n      "voice": "string (voice id from available list, e.g. '${advertisedVoiceToken(availableVoices![0])}'; omit for the teacher — its voice is fixed)"`
+          : `,\n      "voice": "string (voice id from available list, e.g. '${advertisedVoiceToken(availableVoices![0])}')"`
+        : '';
 
-    const userPrompt = `Generate agent profiles for the following course:
+      const userPrompt = `Generate agent profiles for the following course:
 
 Course name: ${stageInfo.name}
 ${stageInfo.description ? `Course description: ${stageInfo.description}` : ''}
@@ -255,114 +275,115 @@ Return a JSON object with this exact structure:
   ]
 }`;
 
-    log.info(`Generating agent profiles for "${stageInfo.name}" [model=${modelString}]`);
+      log.info(`Generating agent profiles for "${stageInfo.name}" [model=${modelString}]`);
 
-    const rawResult = (
-      await callLLM(
-        {
-          model: languageModel,
-          system: systemPrompt,
-          prompt: userPrompt,
-        },
-        'agent-profiles',
-        undefined,
-        thinkingConfig,
-      )
-    ).text;
+      const rawResult = (
+        await callLLM(
+          {
+            model: languageModel,
+            system: systemPrompt,
+            prompt: userPrompt,
+          },
+          'agent-profiles',
+          undefined,
+          thinkingConfig,
+        )
+      ).text;
 
-    // ── Parse LLM response ──
-    const rawText = stripCodeFences(rawResult);
-    let parsed: {
-      agents: Array<{
-        name: string;
-        role: string;
-        persona: string;
-        avatar: string;
-        color: string;
-        priority: number;
-        voice?: unknown;
-        voiceDesign?: unknown;
-      }>;
-    };
+      // ── Parse LLM response ──
+      const rawText = stripCodeFences(rawResult);
+      let parsed: {
+        agents: Array<{
+          name: string;
+          role: string;
+          persona: string;
+          avatar: string;
+          color: string;
+          priority: number;
+          voice?: unknown;
+          voiceDesign?: unknown;
+        }>;
+      };
 
-    try {
-      parsed = JSON.parse(rawText);
-    } catch {
-      log.error('Failed to parse LLM response as JSON:', rawText.substring(0, 500));
-      return apiError('PARSE_FAILED', 500, 'Failed to parse agent profiles from LLM response');
-    }
-
-    // ── Validate parsed structure ──
-    if (!parsed.agents || !Array.isArray(parsed.agents) || parsed.agents.length < 2) {
-      log.error(`Expected at least 2 agents, got ${parsed.agents?.length ?? 0}`);
-      return apiError(
-        'GENERATION_FAILED',
-        500,
-        `Expected at least 2 agents but LLM returned ${parsed.agents?.length ?? 0}`,
-      );
-    }
-
-    const teacherCount = parsed.agents.filter((a) => a.role === 'teacher').length;
-    if (teacherCount !== 1) {
-      log.error(`Expected exactly 1 teacher, got ${teacherCount}`);
-      return apiError(
-        'GENERATION_FAILED',
-        500,
-        `Expected exactly 1 teacher but LLM returned ${teacherCount}`,
-      );
-    }
-
-    // ── Build output with IDs ──
-    const agents = parsed.agents.map((agent, index) => {
-      // The teacher speaks with the user's explicitly selected narrator voice —
-      // the LLM must never reassign it. Everyone else resolves only an
-      // advertised voice token so provider/model/voice remain bound together.
-      let voiceConfig: VoiceBinding | undefined;
-      if (agent.role === 'teacher' && narratorBinding) {
-        voiceConfig = narratorBinding;
-      } else if (agent.voice !== undefined && agent.voice !== null) {
-        const advertised =
-          typeof agent.voice === 'string'
-            ? findAdvertisedVoice(agent.voice, availableVoices)
-            : undefined;
-        if (advertised) {
-          voiceConfig = {
-            providerId: advertised.providerId,
-            ...(advertised.modelId ? { modelId: advertised.modelId } : {}),
-            voiceId: advertised.voiceId,
-          };
-        } else {
-          console.warn(
-            '[AgentProfiles] Dropped voice token not present in the advertised list:',
-            agent.voice,
-          );
-        }
+      try {
+        parsed = JSON.parse(rawText);
+      } catch {
+        log.error('Failed to parse LLM response as JSON:', rawText.substring(0, 500));
+        return fail('PARSE_FAILED', 500, 'Failed to parse agent profiles from LLM response');
       }
 
-      const voiceDesign = normalizeVoiceDesign(agent.voiceDesign);
+      // ── Validate parsed structure ──
+      if (!parsed.agents || !Array.isArray(parsed.agents) || parsed.agents.length < 2) {
+        log.error(`Expected at least 2 agents, got ${parsed.agents?.length ?? 0}`);
+        return fail(
+          'GENERATION_FAILED',
+          500,
+          `Expected at least 2 agents but LLM returned ${parsed.agents?.length ?? 0}`,
+        );
+      }
 
-      return {
-        id: `gen-${nanoid(8)}`,
-        name: agent.name,
-        role: agent.role,
-        persona: agent.persona,
-        avatar: agent.avatar || availableAvatars[index % availableAvatars.length],
-        color: agent.color || AGENT_COLOR_PALETTE[index % AGENT_COLOR_PALETTE.length],
-        priority:
-          agent.priority ?? (agent.role === 'teacher' ? 10 : agent.role === 'assistant' ? 7 : 5),
-        ...(voiceConfig ? { voiceConfig } : {}),
-        ...(voiceDesign ? { voiceDesign } : {}),
-      };
-    });
+      const teacherCount = parsed.agents.filter((a) => a.role === 'teacher').length;
+      if (teacherCount !== 1) {
+        log.error(`Expected exactly 1 teacher, got ${teacherCount}`);
+        return fail(
+          'GENERATION_FAILED',
+          500,
+          `Expected exactly 1 teacher but LLM returned ${teacherCount}`,
+        );
+      }
 
-    log.info(`Successfully generated ${agents.length} agent profiles for "${stageInfo.name}"`);
+      // ── Build output with IDs ──
+      const agents = parsed.agents.map((agent, index) => {
+        // The teacher speaks with the user's explicitly selected narrator voice —
+        // the LLM must never reassign it. Everyone else resolves only an
+        // advertised voice token so provider/model/voice remain bound together.
+        let voiceConfig: VoiceBinding | undefined;
+        if (agent.role === 'teacher' && narratorBinding) {
+          voiceConfig = narratorBinding;
+        } else if (agent.voice !== undefined && agent.voice !== null) {
+          const advertised =
+            typeof agent.voice === 'string'
+              ? findAdvertisedVoice(agent.voice, availableVoices)
+              : undefined;
+          if (advertised) {
+            voiceConfig = {
+              providerId: advertised.providerId,
+              ...(advertised.modelId ? { modelId: advertised.modelId } : {}),
+              voiceId: advertised.voiceId,
+            };
+          } else {
+            console.warn(
+              '[AgentProfiles] Dropped voice token not present in the advertised list:',
+              agent.voice,
+            );
+          }
+        }
 
-    return apiSuccess({ agents });
-  } catch (error) {
-    log.error(
-      `Agent profiles generation failed [stage="${stageName ?? 'unknown'}", model=${modelString ?? 'unknown'}]:`,
-      error,
-    );
-    return apiError('INTERNAL_ERROR', 500, error instanceof Error ? error.message : String(error));
-  }
+        const voiceDesign = normalizeVoiceDesign(agent.voiceDesign);
+
+        return {
+          id: `gen-${nanoid(8)}`,
+          name: agent.name,
+          role: agent.role,
+          persona: agent.persona,
+          avatar: agent.avatar || availableAvatars[index % availableAvatars.length],
+          color: agent.color || AGENT_COLOR_PALETTE[index % AGENT_COLOR_PALETTE.length],
+          priority:
+            agent.priority ?? (agent.role === 'teacher' ? 10 : agent.role === 'assistant' ? 7 : 5),
+          ...(voiceConfig ? { voiceConfig } : {}),
+          ...(voiceDesign ? { voiceDesign } : {}),
+        };
+      });
+
+      log.info(`Successfully generated ${agents.length} agent profiles for "${stageInfo.name}"`);
+
+      return done({ agents });
+    } catch (error) {
+      log.error(
+        `Agent profiles generation failed [stage="${stageName ?? 'unknown'}", model=${modelString ?? 'unknown'}]:`,
+        error,
+      );
+      return fail('INTERNAL_ERROR', 500, error instanceof Error ? error.message : String(error));
+    }
+  });
 }

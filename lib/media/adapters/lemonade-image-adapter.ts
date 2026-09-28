@@ -10,6 +10,7 @@ import type {
   ImageGenerationResult,
 } from '../types';
 import { requireModel } from '../require-model';
+import { imageProviderFetch } from '../provider-fetch';
 
 const DEFAULT_BASE_URL = 'http://localhost:13305/v1';
 
@@ -56,7 +57,7 @@ export async function generateWithLemonadeImage(
   const width = options.width || 1024;
   const height = options.height || 1024;
 
-  const response = await fetch(`${baseUrl}/images/generations`, {
+  const response = await imageProviderFetch(config, `${baseUrl}/images/generations`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',

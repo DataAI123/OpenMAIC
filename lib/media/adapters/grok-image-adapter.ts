@@ -20,6 +20,7 @@ import type {
 } from '../types';
 import { probeAuth } from '../probe-auth';
 import { requireModel } from '../require-model';
+import { imageProviderFetch } from '../provider-fetch';
 
 const DEFAULT_MODEL = 'grok-imagine-image';
 const DEFAULT_BASE_URL = 'https://api.x.ai/v1';
@@ -57,7 +58,7 @@ export async function generateWithGrokImage(
 ): Promise<ImageGenerationResult> {
   const baseUrl = config.baseUrl || DEFAULT_BASE_URL;
 
-  const response = await fetch(`${baseUrl}/images/generations`, {
+  const response = await imageProviderFetch(config, `${baseUrl}/images/generations`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
