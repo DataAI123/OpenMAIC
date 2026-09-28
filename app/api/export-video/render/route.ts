@@ -51,7 +51,7 @@ export async function POST(req: NextRequest) {
     return apiError('INVALID_REQUEST', 413, 'Export archive is too large');
   }
 
-  return withRequestOwnerId(req, async (ownerId, responseHeaders) => {
+  return withRequestOwnerId(req, async (ownerId, responseHeaders, identity) => {
     const contentType = req.headers.get('content-type') ?? '';
     if (!contentType.includes('multipart/form-data') || !req.body) {
       return attachOwnerHeaders(
@@ -110,7 +110,7 @@ export async function POST(req: NextRequest) {
       }
 
       try {
-        await recordRenderJobOwner(jobId, ownerId);
+        await recordRenderJobOwner(jobId, ownerId, identity?.tenantId);
       } catch (error) {
         // Ownership binding is mandatory and fail-closed: a job the app cannot
         // attribute must not be handed to the client. Best-effort cancel it.

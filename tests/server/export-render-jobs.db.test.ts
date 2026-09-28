@@ -52,6 +52,11 @@ beforeAll(async () => {
       'utf8',
     ),
   );
+  // 0021 adds the tenant boundary column the engine now writes and filters on.
+  // That migration also alters asset/material/projection tables this fixture
+  // does not materialize, so the single column this engine touches is applied
+  // here directly; the full migration is covered by its own migration test.
+  await state.db.exec(`ALTER TABLE export_render_job_owners ADD COLUMN tenant_id TEXT`);
   const engine = await import('@/lib/server/export-render-jobs');
   recordRenderJobOwner = engine.recordRenderJobOwner;
   assertRenderJobOwnedBy = engine.assertRenderJobOwnedBy;
@@ -126,5 +131,22 @@ describe('export render job ownership engine (real SQL)', () => {
     } finally {
       process.env.DATABASE_URL = saved;
     }
+  });
+
+  it('binds the tenant: a job submitted under one tenant is invisible under another', async () => {
+    await recordRenderJobOwner('job-t', OWNER, 'tenant-a');
+    // Same owner, same job id, but a different tenant is refused — the same
+    // uniform "not owned" the routes turn into a 404.
+    expect(await assertRenderJobOwnedBy('job-t', OWNER, 'tenant-a')).toBe(true);
+    expect(await assertRenderJobOwnedBy('job-t', OWNER, 'tenant-b')).toBe(false);
+    // An unscoped (legacy) check takes no tenant dimension at all, so it still
+    // matches the tenant-bound row -- the pre-tenant contract, unchanged.
+    expect(await assertRenderJobOwnedBy('job-t', OWNER)).toBe(true);
+
+    // A legacy (tenantless) binding is addressable by the legacy check but
+    // invisible to any scoped one (a NULL row fails "tenant_id = $n").
+    await recordRenderJobOwner('job-legacy', OWNER);
+    expect(await assertRenderJobOwnedBy('job-legacy', OWNER)).toBe(true);
+    expect(await assertRenderJobOwnedBy('job-legacy', OWNER, 'tenant-a')).toBe(false);
   });
 });

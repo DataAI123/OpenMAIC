@@ -40,6 +40,21 @@ export interface AssetPrincipal {
   readonly key: string;
   /** Carried so one principal object can serve several layers. Not the partition key. */
   readonly learnerKey?: string;
+  /**
+   * Optional tenant the operation is scoped to.
+   *
+   * A deployment whose principals are shared across tenants (one user, several
+   * memberships) sets this so every entry statement additionally requires a
+   * matching `asset_entries.tenant_id`; an entry written under one tenant is
+   * then invisible to the same principal acting under another. Omitted, the
+   * column is not consulted at all and every statement is byte-for-byte what it
+   * was before -- legacy principals and single-tenant deployments have no tenant
+   * dimension, and a filter they cannot satisfy would hide their own assets.
+   *
+   * Derived server-side from the session, exactly like {@link key}: never read
+   * from a request path, query parameter, or body.
+   */
+  readonly tenantId?: string;
 }
 
 /**

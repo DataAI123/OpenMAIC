@@ -50,10 +50,15 @@ describe('resolveServerAsset principal selection', () => {
       mimeType: 'text/plain',
     });
 
-    expect(mocks.resolveOidcAssetPrincipal).toHaveBeenCalledWith(mocks.pool, 'user:alice', {
-      method: 'GET',
-      url: 'http://persistence.internal/api/persistence/assets/ast_private/content',
-    });
+    expect(mocks.resolveOidcAssetPrincipal).toHaveBeenCalledWith(
+      mocks.pool,
+      'user:alice',
+      {
+        method: 'GET',
+        url: 'http://persistence.internal/api/persistence/assets/ast_private/content',
+      },
+      undefined,
+    );
     expect(mocks.authenticatePersistenceHeaders).not.toHaveBeenCalled();
     expect(mocks.identify).toHaveBeenCalledWith(
       { key: 'user:alice', learnerKey: 'user:alice' },

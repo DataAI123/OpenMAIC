@@ -182,7 +182,8 @@ export async function POST(req: NextRequest) {
 
   if (!isAgentRuntimeConfigured()) return new Response('Not found', { status: 404 });
 
-  return withRequestOwnerId(req, async (ownerId, responseHeaders) => {
+  return withRequestOwnerId(req, async (ownerId, responseHeaders, identity) => {
+    const tenantId = identity?.tenantId;
     try {
       phase = 'validate_request';
       const rawMime = (req.headers.get('content-type') ?? '').split(';', 1)[0];
@@ -265,6 +266,7 @@ export async function POST(req: NextRequest) {
             throw error;
           }
         },
+        tenantId,
       ).catch((error) => {
         console.warn(
           'material stale-upload reclaim failed; retrying on the next upload',
@@ -286,6 +288,7 @@ export async function POST(req: NextRequest) {
             originalName,
             ossKey,
             extraction: { status: 'idle' },
+            ...(tenantId === undefined ? {} : { tenantId }),
           },
           {
             maxCount: agentRuntimeConfig.maxMaterialsPerOwner,

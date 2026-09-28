@@ -222,11 +222,12 @@ export async function bindOwnerMaterialsToSession(
   sessionId: string,
   ownerId: string,
   materialIds: readonly string[],
+  tenantId?: string,
 ): Promise<Array<{ materialId: string; originalName?: string; mime?: string; bytes: number }>> {
   const connectionString = process.env.DATABASE_URL;
   if (!connectionString) throw new Error('Agent runtime requires DATABASE_URL');
   const provider = await getServerPersistenceProvider(connectionString);
-  const records = await getReadyOwnerMaterials(provider.pool, ownerId, materialIds);
+  const records = await getReadyOwnerMaterials(provider.pool, ownerId, materialIds, tenantId);
   const byteStore = getMaterialByteStore();
   const byId = new Map(records.map((record) => [record.id, record]));
   if (materialIds.some((id) => !byId.has(id))) {

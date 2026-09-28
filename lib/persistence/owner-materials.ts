@@ -42,6 +42,8 @@ export interface OwnerMaterialExtraction {
 export interface OwnerMaterialRecord {
   id: string;
   ownerId: string;
+  /** Tenant the row belongs to; null for legacy / single-tenant rows. */
+  tenantId: string | null;
   kind: OwnerMaterialKind;
   derivedFrom: string | null;
   mime: string | null;
@@ -98,6 +100,8 @@ export interface RegisterOwnerMaterialInput {
   originalName?: string;
   ossKey: string;
   extraction?: OwnerMaterialExtraction;
+  /** Tenant the row belongs to. Omitted for legacy / single-tenant rows. */
+  tenantId?: string;
 }
 
 export const OWNER_MATERIAL_SCHEMA = `
@@ -128,6 +132,15 @@ CREATE INDEX IF NOT EXISTS owner_material_owner_created_idx
 -- go, or its constraint rejects every insert of the new row shape.
 ALTER TABLE owner_material ADD COLUMN IF NOT EXISTS oss_key TEXT NOT NULL DEFAULT '';
 ALTER TABLE owner_material DROP COLUMN IF EXISTS asset_id;
+
+-- Tenant boundary: nullable with no default, so a row written before the column
+-- existed (or by a caller that carries no tenant) stays NULL and a caller that
+-- carries one is filtered to its own rows. The migration backfills user-owned
+-- rows to the default tenant.
+ALTER TABLE owner_material ADD COLUMN IF NOT EXISTS tenant_id TEXT;
+
+CREATE INDEX IF NOT EXISTS owner_material_tenant_owner_created_idx
+  ON owner_material (tenant_id, owner_id, created_at);
 `;
 
 export async function ensureOwnerMaterialSchema(queryable: Queryable): Promise<void> {
@@ -142,6 +155,7 @@ export async function ensureOwnerMaterialSchema(queryable: Queryable): Promise<v
 interface RawOwnerMaterialRow extends Record<string, unknown> {
   id: string;
   owner_id: string;
+  tenant_id: string | null;
   kind: string;
   derived_from: string | null;
   mime: string | null;
@@ -157,6 +171,7 @@ interface RawOwnerMaterialRow extends Record<string, unknown> {
 
 const OWNER_MATERIAL_COLUMNS = `id,
   owner_id,
+  tenant_id,
   kind,
   derived_from,
   mime,
@@ -173,6 +188,7 @@ function rowToRecord(row: RawOwnerMaterialRow): OwnerMaterialRecord {
   return {
     id: row.id,
     ownerId: row.owner_id,
+    tenantId: row.tenant_id ?? null,
     kind: row.kind as OwnerMaterialKind,
     derivedFrom: row.derived_from,
     mime: row.mime,
@@ -249,15 +265,17 @@ export async function reclaimStaleOwnerMaterialUploads(
   queryable: Queryable,
   ownerId: string,
   deleteBytes: (ossKey: string) => Promise<void>,
+  tenantId?: string,
 ): Promise<void> {
   const staleBefore = Date.now() - STALE_UPLOAD_AGE_MS;
+  const tenantFilter = tenantId === undefined ? '' : ' AND tenant_id = $3';
   const stale = await queryable.query<{ id: string; oss_key: string }>(
     `SELECT id, oss_key
        FROM owner_material
       WHERE owner_id = $1
         AND status = 'uploading'
-        AND created_at < $2`,
-    [ownerId, staleBefore],
+        AND created_at < $2${tenantFilter}`,
+    tenantId === undefined ? [ownerId, staleBefore] : [ownerId, staleBefore, tenantId],
   );
   for (const row of stale.rows) {
     if (row.oss_key !== '') {
@@ -302,12 +320,13 @@ export async function registerOwnerMaterial(
       ownerMaterialQuotaLockKey(input.ownerId),
     ]);
 
+    const usageTenant = input.tenantId === undefined ? '' : ' AND tenant_id = $2';
     const usage = await tx.query<{ count: number | string; total_bytes: number | string }>(
       `SELECT COUNT(*)::text AS count,
               COALESCE(SUM(bytes), 0)::text AS total_bytes
          FROM owner_material
-        WHERE owner_id = $1 AND kind = 'source' AND deleted_at IS NULL`,
-      [input.ownerId],
+        WHERE owner_id = $1 AND kind = 'source' AND deleted_at IS NULL${usageTenant}`,
+      input.tenantId === undefined ? [input.ownerId] : [input.ownerId, input.tenantId],
     );
     const count = Number(usage.rows[0]?.count ?? 0);
     const totalBytes = Number(usage.rows[0]?.total_bytes ?? 0);
@@ -320,13 +339,14 @@ export async function registerOwnerMaterial(
 
     const inserted = await tx.query<RawOwnerMaterialRow>(
       `INSERT INTO owner_material
-         (id, owner_id, kind, derived_from, mime, bytes, original_name,
+         (id, owner_id, tenant_id, kind, derived_from, mime, bytes, original_name,
           oss_key, sha256, status, extraction, created_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULL, 'uploading', $9::jsonb, $10)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NULL, 'uploading', $10::jsonb, $11)
        RETURNING ${OWNER_MATERIAL_COLUMNS}`,
       [
         input.id,
         input.ownerId,
+        input.tenantId ?? null,
         input.kind,
         input.derivedFrom ?? null,
         input.mime ?? null,
@@ -376,13 +396,15 @@ export async function abandonOwnerMaterial(
 export async function listOwnerMaterials(
   queryable: Queryable,
   ownerId: string,
+  tenantId?: string,
 ): Promise<OwnerMaterialRecord[]> {
+  const tenantFilter = tenantId === undefined ? '' : ' AND tenant_id = $2';
   const result = await queryable.query<RawOwnerMaterialRow>(
     `SELECT ${OWNER_MATERIAL_COLUMNS}
        FROM owner_material
-      WHERE owner_id = $1 AND status = 'ready' AND deleted_at IS NULL
+      WHERE owner_id = $1 AND status = 'ready' AND deleted_at IS NULL${tenantFilter}
       ORDER BY created_at DESC`,
-    [ownerId],
+    tenantId === undefined ? [ownerId] : [ownerId, tenantId],
   );
   return result.rows.map(rowToRecord);
 }
@@ -392,16 +414,18 @@ export async function getReadyOwnerMaterials(
   queryable: Queryable,
   ownerId: string,
   materialIds: readonly string[],
+  tenantId?: string,
 ): Promise<OwnerMaterialRecord[]> {
   if (materialIds.length === 0) return [];
+  const tenantFilter = tenantId === undefined ? '' : ' AND tenant_id = $3';
   const result = await queryable.query<RawOwnerMaterialRow>(
     `SELECT ${OWNER_MATERIAL_COLUMNS}
        FROM owner_material
       WHERE owner_id = $1
         AND id = ANY($2::text[])
         AND status = 'ready'
-        AND deleted_at IS NULL`,
-    [ownerId, [...materialIds]],
+        AND deleted_at IS NULL${tenantFilter}`,
+    tenantId === undefined ? [ownerId, [...materialIds]] : [ownerId, [...materialIds], tenantId],
   );
   return result.rows.map(rowToRecord);
 }

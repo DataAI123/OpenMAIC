@@ -60,18 +60,26 @@ async function getPool(): Promise<Pool> {
  * idempotent (`ON CONFLICT DO NOTHING`) so a retried submit cannot silently
  * re-point an already-bound job at a different owner. A best-effort sweep then
  * reclaims expired bindings; a sweep failure never fails the submit itself.
+ *
+ * `tenantId` records the tenant the submit was made under. It is part of the
+ * binding, so the same user acting under another tenant cannot poll, cancel, or
+ * download a job they submitted elsewhere.
  */
-export async function recordRenderJobOwner(jobId: string, ownerId: string): Promise<void> {
+export async function recordRenderJobOwner(
+  jobId: string,
+  ownerId: string,
+  tenantId?: string,
+): Promise<void> {
   if (!isSafeRenderJobId(jobId)) throw new TypeError('EXPORT_RENDER_JOB_INVALID_ID');
   if (typeof ownerId !== 'string' || ownerId.length === 0) {
     throw new TypeError('EXPORT_RENDER_JOB_REQUIRES_OWNER');
   }
   const pool = await getPool();
   await pool.query(
-    `INSERT INTO export_render_job_owners (job_id, owner_id)
-     VALUES ($1, $2)
+    `INSERT INTO export_render_job_owners (job_id, owner_id, tenant_id)
+     VALUES ($1, $2, $3)
      ON CONFLICT (job_id) DO NOTHING`,
-    [jobId, ownerId],
+    [jobId, ownerId, tenantId ?? null],
   );
   await pool
     .query(
@@ -85,15 +93,25 @@ export async function recordRenderJobOwner(jobId: string, ownerId: string): Prom
  * Whether `ownerId` owns `jobId`. A malformed, foreign, or unknown id all return
  * false so callers can answer one uniform 404; only a store outage throws (the
  * caller must fail closed).
+ *
+ * `tenantId`, when supplied, must match the binding's recorded tenant as well:
+ * a binding made under one tenant is invisible to the same owner under another,
+ * so a job id learned while a user is in two tenants is not a cross-tenant read
+ * of which tenant submitted it.
  */
-export async function assertRenderJobOwnedBy(jobId: string, ownerId: string): Promise<boolean> {
+export async function assertRenderJobOwnedBy(
+  jobId: string,
+  ownerId: string,
+  tenantId?: string,
+): Promise<boolean> {
   if (!isSafeRenderJobId(jobId)) return false;
   const pool = await getPool();
+  const tenantFilter = tenantId === undefined ? '' : ' AND tenant_id = $3';
   const result = await pool.query(
     `SELECT 1 FROM export_render_job_owners
-      WHERE job_id = $1 AND owner_id = $2
+      WHERE job_id = $1 AND owner_id = $2${tenantFilter}
       LIMIT 1`,
-    [jobId, ownerId],
+    tenantId === undefined ? [jobId, ownerId] : [jobId, ownerId, tenantId],
   );
   return (result.rowCount ?? result.rows.length) > 0;
 }

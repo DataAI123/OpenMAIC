@@ -156,12 +156,7 @@ export async function POST(req: NextRequest) {
         responseHeaders.set('Retry-After', String(error.retryAfterSeconds));
         return ownerApiError('RATE_LIMITED', 429, 'Too many PDF parse requests', responseHeaders);
       }
-      return ownerApiError(
-        'INTERNAL_ERROR',
-        503,
-        'Rate limiting is unavailable',
-        responseHeaders,
-      );
+      return ownerApiError('INTERNAL_ERROR', 503, 'Rate limiting is unavailable', responseHeaders);
     }
     const response = await handlePost(req, true);
     const headers = new Headers(response.headers);

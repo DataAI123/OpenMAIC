@@ -35,12 +35,18 @@ export type ServerAssetResolution =
  * multi-hundred-MB asset cannot be pulled into server memory just to be
  * rejected. The caller keeps its post-resolve length check as a defensive
  * backstop against a store whose recorded length disagrees with the bytes.
+ *
+ * `tenantId`, when supplied alongside `authenticatedOwnerId`, scopes the OIDC
+ * principal resolution (and therefore the store reads) to that tenant. Omitted,
+ * the legacy shared-partition path is unchanged and no tenant dimension is
+ * consulted.
  */
 export async function resolveServerAsset(
   assetId: string,
   headers: Headers,
   maxByteLength?: number,
   authenticatedOwnerId?: string,
+  tenantId?: string,
 ): Promise<ServerAssetResolution> {
   const connectionString = process.env.DATABASE_URL;
   if (!connectionString) return { status: 'unconfigured' };
@@ -52,10 +58,15 @@ export async function resolveServerAsset(
       if (!authenticatedOwnerId.startsWith('user:') || authenticatedOwnerId.length === 5) {
         return { status: 'unauthenticated' };
       }
-      assetPrincipal = await resolveOidcAssetPrincipal(provider.pool, authenticatedOwnerId, {
-        method: 'GET',
-        url: `http://persistence.internal/api/persistence/assets/${encodeURIComponent(assetId)}/content`,
-      });
+      assetPrincipal = await resolveOidcAssetPrincipal(
+        provider.pool,
+        authenticatedOwnerId,
+        {
+          method: 'GET',
+          url: `http://persistence.internal/api/persistence/assets/${encodeURIComponent(assetId)}/content`,
+        },
+        tenantId,
+      );
       if (!assetPrincipal) return { status: 'missing' };
     } else {
       // Shared-partition development auth remains the legacy compatibility

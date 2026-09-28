@@ -24,8 +24,8 @@ export async function GET(req: NextRequest, context: { params: Promise<{ jobId: 
     return apiError('PROVIDER_DISABLED', 501, 'Render service is not configured');
   }
 
-  return withRequestOwnerId(req, async (ownerId, responseHeaders) => {
-    const gate = await guardRenderJobAccess(jobId, ownerId, responseHeaders);
+  return withRequestOwnerId(req, async (ownerId, responseHeaders, identity) => {
+    const gate = await guardRenderJobAccess(jobId, ownerId, responseHeaders, identity?.tenantId);
     if (gate) return gate;
 
     try {
@@ -60,8 +60,8 @@ export async function DELETE(req: NextRequest, context: { params: Promise<{ jobI
     return apiError('PROVIDER_DISABLED', 501, 'Render service is not configured');
   }
 
-  return withRequestOwnerId(req, async (ownerId, responseHeaders) => {
-    const gate = await guardRenderJobAccess(jobId, ownerId, responseHeaders);
+  return withRequestOwnerId(req, async (ownerId, responseHeaders, identity) => {
+    const gate = await guardRenderJobAccess(jobId, ownerId, responseHeaders, identity?.tenantId);
     if (gate) return gate;
 
     try {

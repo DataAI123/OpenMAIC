@@ -130,10 +130,15 @@ async function createPersistenceHandler(
           connectionString,
           poolFactory,
         );
-        return resolveOidcAssetPrincipal(assetAccessPool, ownerId, {
-          method: request.method ?? 'GET',
-          url: request.url ?? '/',
-        });
+        return resolveOidcAssetPrincipal(
+          assetAccessPool,
+          ownerId,
+          {
+            method: request.method ?? 'GET',
+            url: request.url ?? '/',
+          },
+          tenantId,
+        );
       }
       if (request.url?.startsWith('/documents')) return { learnerKey: ownerId };
       if (request.url?.startsWith('/assets')) {

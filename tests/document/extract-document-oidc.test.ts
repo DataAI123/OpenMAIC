@@ -87,6 +87,7 @@ describe('POST /api/extract-document OIDC identity boundary', () => {
       request.headers,
       50 * 1024 * 1024,
       'user:alice',
+      'default',
     );
     expect(mocks.consumeActionRateLimit).toHaveBeenCalledWith('user:alice', 'extract_document');
     expect(response.status).toBe(200);

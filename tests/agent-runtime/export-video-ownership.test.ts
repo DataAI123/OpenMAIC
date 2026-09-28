@@ -65,7 +65,7 @@ describe('GET poll job — ownership gates the relay', () => {
     const response = await pollGet(new NextRequest(url(), { method: 'GET' }), ctx());
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toMatchObject({ success: true, state: 'rendering' });
-    expect(mocks.assertRenderJobOwnedBy).toHaveBeenCalledWith('job-1', 'user:owner-a');
+    expect(mocks.assertRenderJobOwnedBy).toHaveBeenCalledWith('job-1', 'user:owner-a', undefined);
     expect(mocks.proxyFetch).toHaveBeenCalledTimes(1);
   });
 
@@ -146,7 +146,7 @@ describe('POST submit — binds the job to its owner before advertising it', () 
     const response = await submit(submitRequest());
     expect(response.status).toBe(202);
     await expect(response.json()).resolves.toMatchObject({ success: true, jobId: 'job-9' });
-    expect(mocks.recordRenderJobOwner).toHaveBeenCalledWith('job-9', 'user:owner-a');
+    expect(mocks.recordRenderJobOwner).toHaveBeenCalledWith('job-9', 'user:owner-a', undefined);
     // Only the submit call; no cancel on the happy path.
     expect(mocks.proxyFetch).toHaveBeenCalledTimes(1);
   });

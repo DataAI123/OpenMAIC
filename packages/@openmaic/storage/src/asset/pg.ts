@@ -166,6 +166,14 @@ export const ASSET_PG_SCHEMA: readonly string[] = [
      ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ`,
   `ALTER TABLE asset_entries
      ADD COLUMN IF NOT EXISTS unreferenced_at TIMESTAMPTZ`,
+  // Tenant boundary. Nullable with no default, so a row written before the
+  // column existed (and any row written by a principal that carries no tenant)
+  // stays NULL, and a principal that does carry one is filtered to its own
+  // rows. The migration backfills `user:%` principals to the default tenant;
+  // this schema statement only widens the table so a fresh database can accept
+  // the column too.
+  `ALTER TABLE asset_entries
+     ADD COLUMN IF NOT EXISTS tenant_id TEXT`,
   `CREATE TABLE IF NOT EXISTS document_asset_refs (
      stage_id TEXT NOT NULL,
      scope TEXT NOT NULL CHECK (scope IN ('stage', 'scene')),
@@ -181,6 +189,8 @@ export const ASSET_PG_SCHEMA: readonly string[] = [
      ON asset_entries (unreferenced_at) WHERE unreferenced_at IS NOT NULL`,
   `CREATE INDEX IF NOT EXISTS asset_entries_legacy_idx
      ON asset_entries (id) WHERE committed_at IS NULL AND expires_at IS NULL`,
+  `CREATE INDEX IF NOT EXISTS asset_entries_tenant_principal_idx
+     ON asset_entries (tenant_id, principal, id)`,
   `CREATE TABLE IF NOT EXISTS asset_reference_tracking (
      singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton),
      enabled_at TIMESTAMPTZ NOT NULL
@@ -390,6 +400,25 @@ export class PgAssetStore implements AssetStore {
     await queryable.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [principal.key]);
   }
 
+  /**
+   * The tenant predicate for an entry statement, and the argument it binds.
+   *
+   * Empty when the principal carries no tenant, so every statement is exactly
+   * what it was before that dimension existed. When it does carry one, the
+   * caller appends the returned SQL to a `WHERE` clause already in progress and
+   * spreads `args` after its own parameters. `column` names the qualified
+   * column for statements that alias the table.
+   */
+  private tenantPredicate(
+    principal: AssetPrincipal,
+    paramIndex: number,
+    column = 'tenant_id',
+  ): { sql: string; args: unknown[] } {
+    return principal.tenantId === undefined
+      ? { sql: '', args: [] }
+      : { sql: ` AND ${column} = $${paramIndex}`, args: [principal.tenantId] };
+  }
+
   private async assertPutQuota(
     queryable: Queryable,
     principal: AssetPrincipal,
@@ -399,6 +428,7 @@ export class PgAssetStore implements AssetStore {
     await this.lockPrincipal(queryable, principal);
     let result;
     try {
+      const tenant = this.tenantPredicate(principal, 2, 'entries.tenant_id');
       result = await queryable.query<UsageRow>(
         // Everything not yet stamped unreferenced. An entry whose last
         // document reference is gone is on its way out, so counting it would
@@ -408,11 +438,16 @@ export class PgAssetStore implements AssetStore {
         // passed, because only the entry pass removes it, and a quota that
         // over-counts for one collection interval refuses a write slightly
         // early rather than admitting one it should not.
+        //
+        // The live sum is scoped to the principal's tenant when it carries one,
+        // so a principal shared across tenants accounts, and is bounded, per
+        // tenant: one tenant's stored bytes can neither fill nor disclose
+        // another's quota.
         `SELECT COALESCE(SUM(blobs.byte_size), 0)::text AS logical_bytes
            FROM asset_entries AS entries
            JOIN asset_blobs AS blobs ON blobs.content_hash = entries.content_hash
-          WHERE entries.principal = $1 AND entries.unreferenced_at IS NULL`,
-        [principal.key],
+          WHERE entries.principal = $1 AND entries.unreferenced_at IS NULL${tenant.sql}`,
+        [principal.key, ...tenant.args],
       );
     } catch {
       throw registryFailure('quota check');
@@ -431,12 +466,19 @@ export class PgAssetStore implements AssetStore {
     await this.lockPrincipal(queryable, principal);
     let result;
     try {
+      const usageTenant = this.tenantPredicate(principal, 3, 'entries.tenant_id');
+      const currentTenant = this.tenantPredicate(principal, 3, 'current_entry.tenant_id');
       result = await queryable.query<ReplaceUsageRow>(
         // Same live-entry sum as assertPutQuota. `current_counts` says whether
         // the entry being replaced is part of that sum: replace leaves the
         // lifecycle columns alone, so an entry that has already lost its last
         // reference is outside the sum before the replace and still outside it
         // after, and neither its old nor its new bytes may move the total.
+        //
+        // Both halves are tenant-scoped together when the principal carries a
+        // tenant: the sum counts this tenant's live bytes, and the current-entry
+        // lookup misses an entry another tenant owns -- so a cross-tenant
+        // replace is a not-found rather than a charge against the wrong tenant.
         `SELECT current_blob.byte_size::text AS current_bytes,
                 current_entry.unreferenced_at IS NULL AS current_counts,
                 usage.logical_bytes
@@ -447,10 +489,10 @@ export class PgAssetStore implements AssetStore {
              SELECT COALESCE(SUM(blobs.byte_size), 0)::text AS logical_bytes
                FROM asset_entries AS entries
                JOIN asset_blobs AS blobs ON blobs.content_hash = entries.content_hash
-              WHERE entries.principal = $2 AND entries.unreferenced_at IS NULL
+              WHERE entries.principal = $2 AND entries.unreferenced_at IS NULL${usageTenant.sql}
            ) AS usage
-          WHERE current_entry.id = $1 AND current_entry.principal = $2`,
-        [ref, principal.key],
+          WHERE current_entry.id = $1 AND current_entry.principal = $2${currentTenant.sql}`,
+        [ref, principal.key, ...currentTenant.args],
       );
     } catch {
       throw registryFailure('quota check');
@@ -517,10 +559,19 @@ export class PgAssetStore implements AssetStore {
         await queryable.query(
           `INSERT INTO asset_entries
              (id, principal, content_hash, mime, meta, revision, created_at,
-              committed_at, expires_at, unreferenced_at)
+              committed_at, expires_at, unreferenced_at, tenant_id)
            VALUES ($1, $2, $3, $4, $5::jsonb, 1, $6,
-                   NULL, now() + ($7::double precision * interval '1 millisecond'), NULL)`,
-          [id, principal.key, contentHash, mime, encodedMeta, Date.now(), this.pendingTtlMs],
+                   NULL, now() + ($7::double precision * interval '1 millisecond'), NULL, $8)`,
+          [
+            id,
+            principal.key,
+            contentHash,
+            mime,
+            encodedMeta,
+            Date.now(),
+            this.pendingTtlMs,
+            principal.tenantId ?? null,
+          ],
         );
       });
     } catch (error) {
@@ -534,11 +585,12 @@ export class PgAssetStore implements AssetStore {
     if (!isLosslessJsonString(ref) || !isLosslessJsonString(principal.key)) return null;
     try {
       return await this.transaction(async (queryable) => {
+        const tenant = this.tenantPredicate(principal, 3);
         const result = await queryable.query<EntryRow>(
           `SELECT content_hash, mime, revision
              FROM asset_entries
-            WHERE id = $1 AND principal = $2`,
-          [ref, principal.key],
+            WHERE id = $1 AND principal = $2${tenant.sql}`,
+          [ref, principal.key, ...tenant.args],
         );
         const entry = result.rows[0];
         if (!entry) return null;
@@ -590,11 +642,12 @@ export class PgAssetStore implements AssetStore {
     let read: { hash: ContentHash; mime: string; revision: number } | null;
     try {
       read = await this.transaction(async (queryable) => {
+        const tenant = this.tenantPredicate(principal, 3);
         const result = await queryable.query<EntryRow>(
           `SELECT content_hash, mime, revision
              FROM asset_entries
-            WHERE id = $1 AND principal = $2`,
-          [ref, principal.key],
+            WHERE id = $1 AND principal = $2${tenant.sql}`,
+          [ref, principal.key, ...tenant.args],
         );
         const entry = result.rows[0];
         if (!entry) return null;
@@ -632,12 +685,13 @@ export class PgAssetStore implements AssetStore {
   async identify(principal: AssetPrincipal, ref: AssetRef): Promise<AssetIdentity | null> {
     if (!isLosslessJsonString(ref) || !isLosslessJsonString(principal.key)) return null;
     try {
+      const tenant = this.tenantPredicate(principal, 3, 'entries.tenant_id');
       const result = await this.queryable.query<IdentityRow>(
         `SELECT entries.mime, entries.revision, blobs.byte_size
            FROM asset_entries AS entries
            JOIN asset_blobs AS blobs ON blobs.content_hash = entries.content_hash
-          WHERE entries.id = $1 AND entries.principal = $2`,
-        [ref, principal.key],
+          WHERE entries.id = $1 AND entries.principal = $2${tenant.sql}`,
+        [ref, principal.key, ...tenant.args],
       );
       const identity = result.rows[0];
       if (!identity) return null;
@@ -664,11 +718,12 @@ export class PgAssetStore implements AssetStore {
     if (!isLosslessJsonString(ref) || !isLosslessJsonString(principal.key)) return;
     try {
       await this.writeTransaction(async (queryable) => {
+        const tenant = this.tenantPredicate(principal, 3);
         const deleted = await queryable.query<HashRow>(
           `DELETE FROM asset_entries
-            WHERE id = $1 AND principal = $2
+            WHERE id = $1 AND principal = $2${tenant.sql}
             RETURNING content_hash`,
-          [ref, principal.key],
+          [ref, principal.key, ...tenant.args],
         );
         const hash = deleted.rows[0]?.content_hash;
         if (!hash) return;
@@ -705,12 +760,13 @@ export class PgAssetStore implements AssetStore {
     try {
       return await this.writeTransaction(async (queryable) => {
         await this.assertReplaceQuota(queryable, principal, ref, bytes.byteLength);
+        const tenant = this.tenantPredicate(principal, 3);
         const existing = await queryable.query<EntryRow>(
           `SELECT content_hash, mime, meta, revision
              FROM asset_entries
-            WHERE id = $1 AND principal = $2
+            WHERE id = $1 AND principal = $2${tenant.sql}
             FOR UPDATE`,
-          [ref, principal.key],
+          [ref, principal.key, ...tenant.args],
         );
         const oldEntry = existing.rows[0];
         if (!oldEntry) throw new RegistryAssetNotFound();
@@ -736,9 +792,9 @@ export class PgAssetStore implements AssetStore {
                 SET content_hash = $3,
                     mime = CASE WHEN $4 = '' THEN mime ELSE $4 END,
                     revision = revision + 1
-              WHERE id = $1 AND principal = $2
+              WHERE id = $1 AND principal = $2${tenant.sql}
               RETURNING revision`,
-            [ref, principal.key, contentHash, data.type],
+            [ref, principal.key, contentHash, data.type, ...tenant.args],
           );
         } else {
           updated = await queryable.query<{ revision: number | string }>(
@@ -747,9 +803,9 @@ export class PgAssetStore implements AssetStore {
                     mime = $4,
                     meta = $5::jsonb,
                     revision = revision + 1
-              WHERE id = $1 AND principal = $2
+              WHERE id = $1 AND principal = $2${tenant.sql}
               RETURNING revision`,
-            [ref, principal.key, contentHash, replacementMime, encodedMeta],
+            [ref, principal.key, contentHash, replacementMime, encodedMeta, ...tenant.args],
           );
         }
 

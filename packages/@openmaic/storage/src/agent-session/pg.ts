@@ -232,6 +232,7 @@ CREATE TABLE IF NOT EXISTS agent_owner_session_event_counters (
 
 CREATE TABLE IF NOT EXISTS agent_owner_session_events (
   owner_id   TEXT NOT NULL,
+  tenant_id  TEXT,
   id         BIGINT NOT NULL,
   ts         BIGINT NOT NULL,
   session_id TEXT NOT NULL,
@@ -248,6 +249,18 @@ CREATE TABLE IF NOT EXISTS agent_owner_session_events (
   CONSTRAINT agent_owner_session_events_attempt_nonnegative
     CHECK (attempt IS NULL OR attempt >= 0)
 );
+
+-- Tenant boundary for the owner event projection. Mirrors the session's
+-- tenant so a tenant-scoped reader never sees another tenant's entries: a NULL
+-- row (legacy/anonymous) is invisible to a scoped read, and a row of another
+-- tenant is filtered out by "AND tenant_id = $n". The owner counter stays
+-- owner-keyed and id allocation stays globally monotonic per owner, so ids in
+-- one tenant are simply sparse, never reused.
+ALTER TABLE agent_owner_session_events
+  ADD COLUMN IF NOT EXISTS tenant_id TEXT;
+
+CREATE INDEX IF NOT EXISTS agent_owner_session_events_tenant_owner_id_idx
+  ON agent_owner_session_events (tenant_id, owner_id, id);
 
 DO $agent_session_owner_event_type_constraint$
 BEGIN
@@ -1535,8 +1548,8 @@ export class PgAgentSessionStore
     const savepoint = `agent_session_projection_${(savepointSerial += 1)}`;
     try {
       await transaction.query(`SAVEPOINT ${savepoint}`);
-      const locked = await transaction.query<{ owner_id: string }>(
-        `SELECT owner_id FROM ${this.table('sessions')} WHERE id = $1 FOR UPDATE`,
+      const locked = await transaction.query<{ owner_id: string; tenant_id: string | null }>(
+        `SELECT owner_id, tenant_id FROM ${this.table('sessions')} WHERE id = $1 FOR UPDATE`,
         [event.sessionId],
       );
       const session = locked.rows[0];
@@ -1558,10 +1571,11 @@ export class PgAgentSessionStore
       const data = event.type === 'session_title' ? { title: event.title } : {};
       await transaction.query(
         `INSERT INTO ${this.table('ownerEvents')}
-          (owner_id, id, ts, session_id, type, status, attempt, data)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)`,
+          (owner_id, tenant_id, id, ts, session_id, type, status, attempt, data)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb)`,
         [
           session.owner_id,
+          session.tenant_id ?? null,
           String(counter.n),
           event.ts,
           event.sessionId,
@@ -1614,8 +1628,8 @@ export class PgAgentSessionStore
     }>(
       `SELECT owner_id, id, ts, session_id, type, status, attempt, data
        FROM ${this.table('ownerEvents')}
-       WHERE owner_id = $1 AND id > $2 ORDER BY id LIMIT $3`,
-      [ownerId, afterId.toString(), limit],
+       WHERE owner_id = $1 AND id > $2${this.tenantFilter(4)} ORDER BY id LIMIT $3`,
+      [ownerId, afterId.toString(), limit, ...this.tenantArgs()],
     );
     return result.rows.map((row) => {
       const base = {
@@ -1644,6 +1658,18 @@ export class PgAgentSessionStore
   }
 
   async readMaxId(ownerId: string): Promise<bigint> {
+    // A tenant-scoped reader must measure its high-water mark over the rows it
+    // can actually see: the owner counter is owner-global, so reading it here
+    // would report ids allocated to other tenants and make a scoped
+    // after-id/max-id stream look caught up on entries it can never receive.
+    if (this.tenantScope !== undefined) {
+      const scoped = await this.queryable.query<{ n: bigint | string | null }>(
+        `SELECT COALESCE(MAX(id), 0) AS n FROM ${this.table('ownerEvents')}
+         WHERE owner_id = $1 AND tenant_id = $2`,
+        [ownerId, this.tenantScope],
+      );
+      return BigInt(scoped.rows[0]?.n ?? 0);
+    }
     const result = await this.queryable.query<{ n: bigint | string }>(
       `SELECT n FROM ${this.table('ownerEventCounters')} WHERE owner_id = $1`,
       [ownerId],
@@ -1716,10 +1742,10 @@ export class PgAgentSessionStore
              FROM ${this.table('ownerEvents')} e WHERE e.owner_id = $1
            )
            INSERT INTO ${this.table('ownerEvents')}
-             (owner_id, id, ts, session_id, type, status, attempt, data)
-           SELECT $2, bounds.high + source_events.ordinal, source_events.ts,
-                  source_events.session_id, source_events.type, source_events.status,
-                  source_events.attempt, source_events.data
+             (owner_id, tenant_id, id, ts, session_id, type, status, attempt, data)
+           SELECT $2, source_events.tenant_id, bounds.high + source_events.ordinal,
+                  source_events.ts, source_events.session_id, source_events.type,
+                  source_events.status, source_events.attempt, source_events.data
            FROM source_events CROSS JOIN bounds`,
           [fromOwnerId, finalTarget],
         );

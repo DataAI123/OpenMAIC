@@ -444,7 +444,7 @@ async function runExtraction(
   return apiSuccess({ data: resultWithMetadata });
 }
 
-async function handlePost(req: NextRequest, authenticatedOwnerId?: string) {
+async function handlePost(req: NextRequest, authenticatedOwnerId?: string, tenantId?: string) {
   const logState: ExtractLogState = {};
   // Whether this request took the asset-id (JSON) form. The multipart byte
   // form's observable behavior is frozen; a few JSON-path-only responses use
@@ -549,6 +549,7 @@ async function handlePost(req: NextRequest, authenticatedOwnerId?: string) {
                 req.headers,
                 MAX_EXTRACT_DOCUMENT_FILE_SIZE_BYTES,
                 authenticatedOwnerId,
+                tenantId,
               );
       } catch (error) {
         // A failure from the server asset store (DB outage, registry failure)
@@ -677,27 +678,17 @@ export async function POST(req: NextRequest) {
   }
   if (!oidcMode) return handlePost(req);
 
-  return withRequestOwnerId(req, async (ownerId, responseHeaders) => {
+  return withRequestOwnerId(req, async (ownerId, responseHeaders, identity) => {
     try {
       await consumeActionRateLimit(ownerId, 'extract_document');
     } catch (error) {
       if (error instanceof UserApiRateLimitExceededError) {
         responseHeaders.set('Retry-After', String(error.retryAfterSeconds));
-        return ownerApiError(
-          'RATE_LIMITED',
-          429,
-          'Too many extraction requests',
-          responseHeaders,
-        );
+        return ownerApiError('RATE_LIMITED', 429, 'Too many extraction requests', responseHeaders);
       }
-      return ownerApiError(
-        'INTERNAL_ERROR',
-        503,
-        'Rate limiting is unavailable',
-        responseHeaders,
-      );
+      return ownerApiError('INTERNAL_ERROR', 503, 'Rate limiting is unavailable', responseHeaders);
     }
-    const response = await handlePost(req, ownerId);
+    const response = await handlePost(req, ownerId, identity?.tenantId);
     const headers = new Headers(response.headers);
     responseHeaders.forEach((value, name) => headers.set(name, value));
     headers.set('Cache-Control', 'private, no-store');

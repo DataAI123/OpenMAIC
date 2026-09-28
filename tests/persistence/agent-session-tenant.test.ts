@@ -144,4 +144,26 @@ describe('agent session tenant boundaries', () => {
     });
     expect(claim).toMatchObject({ id: 'a1', tenantId: 'tenant-a' });
   });
+
+  it('projects owner events per tenant and measures a scoped high-water mark', async () => {
+    await store('tenant-a').createSession({ id: 'a1', ownerId: owner, prompt: 'a' });
+    await store('tenant-b').createSession({ id: 'b1', ownerId: owner, prompt: 'b' });
+
+    // A scoped read sees only its own tenant's projection rows, even though the
+    // owner counter is shared and allocated both ids.
+    const a = await store('tenant-a').readAfter(owner, BigInt(0));
+    const b = await store('tenant-b').readAfter(owner, BigInt(0));
+    expect(a.map((event) => event.sessionId)).toEqual(['a1']);
+    expect(b.map((event) => event.sessionId)).toEqual(['b1']);
+
+    // The high-water mark is measured over visible rows, not the owner-global
+    // counter, so a scoped stream never thinks it is caught up on ids it can
+    // never receive.
+    expect(await store('tenant-a').readMaxId(owner)).toBe(BigInt(a[a.length - 1]!.id));
+    expect(await store('tenant-a').readMaxId(owner)).toBeLessThan(await store().readMaxId(owner));
+
+    // Legacy (unscoped) still sees the whole owner stream.
+    const all = await store().readAfter(owner, BigInt(0));
+    expect(all.map((event) => event.sessionId).sort()).toEqual(['a1', 'b1']);
+  });
 });

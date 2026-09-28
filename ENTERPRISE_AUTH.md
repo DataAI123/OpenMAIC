@@ -306,12 +306,77 @@ across requests.
   from that value, so the run's own reads and writes are tenant-locked even
   though the claim was not. This is the only cross-tenant statement in the
   store.
-- **Known residual (batch 22).** The owner-events projection
-  (`agent_owner_session_events`) is still keyed by `owner_id` and has no tenant
-  column, so a single user in two tenants shares one projection stream. It is a
-  read-side projection only; the authoritative `agent_sessions` boundary above
-  is enforced. The tenant column and per-tenant key arrive with the batch 22
-  resource boundary.
+- **Owner-events projection.** The projection (`agent_owner_session_events`) was
+  a batch 21 residual: it stayed keyed by `owner_id` with no tenant column, so a
+  single user in two tenants shared one projection stream. It is a read-side
+  projection only, and the authoritative `agent_sessions` boundary above was
+  always enforced. The tenant column and per-tenant high-water mark were added
+  in batch 22 — see the resource boundary below.
+
+### Resource tenant boundaries: assets, materials, exports, projections (batch 22)
+
+Four more owner-scoped resources gain a `tenant_id` column and tenant-aware
+statements, so one user in two tenants sees only the rows of the tenant it is
+acting in (migration `0021_resource_tenant_boundaries_assets.sql`). As
+everywhere else on this boundary, the tenant is resolved server-side and passed
+as an optional last argument; leaving it `undefined` reproduces the previous,
+tenant-blind statement byte for byte (the legacy behavior).
+
+- **Asset store** (`asset_entries`, `@openmaic/storage/asset/pg`).
+  `AssetPrincipal` gains a server-derived `tenantId` (`asset/types.ts`). When it
+  is present, the quota checks, `put`, `resolve`, `resolveIndirect`, `identify`,
+  `remove`, and `replace` all append `AND tenant_id = $n`, and `put` writes the
+  tenant on insert. A cross-tenant read resolves as `null`/`false` — the same
+  face as a missing asset — so the boundary is not an existence oracle. A
+  legacy principal (no tenant) keeps its owner-only addressing and continues to
+  see every row.
+- **Owner material library** (`owner_material`,
+  `lib/persistence/owner-materials.ts`). `registerOwnerMaterial`,
+  `listOwnerMaterials`, `getReadyOwnerMaterials`, and
+  `reclaimStaleOwnerMaterialUploads` take an optional tenant; the stale-upload
+  sweeper is scoped so it never reclaims another tenant's reservations.
+- **Video export job ownership** (`export_render_job_owners`,
+  `lib/server/export-render-jobs.ts`). `recordRenderJobOwner` writes the tenant
+  and `assertRenderJobOwnedBy` / `guardRenderJobAccess` compare it, so a job
+  recorded in one tenant cannot be read, downloaded, or deleted from another.
+- **Owner-events projection** (`agent_owner_session_events`,
+  `@openmaic/storage/agent-session/pg`). Each projection row now carries the
+  tenant of its session: `appendProjection` stamps it, and `readAfter` filters
+  `tenant_id = $n` when the store is tenant-scoped. A scoped reader derives its
+  high-water mark with `MAX(id)` over its own tenant rather than the
+  owner-global counter, so a second tenant's stream can never make it believe it
+  has caught up. `mergeOwner` preserves the column. This closes the batch 21
+  residual above.
+
+The migration is forward-only and idempotent: four
+`ALTER TABLE ... ADD COLUMN IF NOT EXISTS tenant_id TEXT REFERENCES tenants(id)
+ON DELETE RESTRICT`, idempotent `UPDATE ... SET tenant_id = 'default' WHERE
+tenant_id IS NULL AND <owner column> LIKE 'user:%'` backfills (`anon:%` rows stay
+`NULL`), and one composite `(tenant_id, <owner column>, ...)` index per table.
+The column is also declared (unconditionally, without the foreign key) in each
+package's own schema, so a database that initializes the schema before the
+migration still passes and the two orders converge.
+
+**Known residual.** The usage reader (`lib/server/usage-storage.ts`) records the
+server-derived `ownerId`/`tenantId` on every row but filters reads by `ownerId`
+only, so a multi-tenant user's usage is aggregated by owner at read time. The
+per-row tenant is retained for downstream attribution; a tenant-filtered read is
+left for a later batch.
+
+#### Process-local state and cache keys: audit conclusion
+
+A sweep of process-local state and cache keys found no tenant-crossing store
+that needs a new key. Each is either already tenant-tagged or scoped by an
+opaque id that is itself tenant-unique:
+
+- **Agent event wake-up bus** (`lib/server/agent-runtime/event-notify-bus.ts`)
+  keys subscribers by `owner:<ownerId>`, `session:<sessionId>`, or
+  `stage:<stageId>`. It carries only a wake-up signal — no payload — and
+  session/stage ids are globally unique, so no tenant data crosses.
+- **Classroom generation jobs** (`lib/server/classroom-job-store.ts`) persist
+  `tenantId` in each job file and refuse a read whose `(ownerId, tenantId)` does
+  not match. Its `jobLocks` mutex is keyed by `jobId`, which is unique per job
+  file, so the lock never spans two tenants' jobs.
 
 ## Anonymous data policy
 

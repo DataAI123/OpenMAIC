@@ -106,9 +106,12 @@ describe('POST agent session message', () => {
     const response = await call({ text: '', materialIds: ['mat-1'] });
 
     expect(response.status).toBe(202);
-    expect(mocks.bindOwnerMaterialsToSession).toHaveBeenCalledWith('session-1', 'owner-1', [
-      'mat-1',
-    ]);
+    expect(mocks.bindOwnerMaterialsToSession).toHaveBeenCalledWith(
+      'session-1',
+      'owner-1',
+      ['mat-1'],
+      undefined,
+    );
     expect(mocks.postUserMessage).toHaveBeenCalledWith(
       'session-1',
       { text: '', materials: [material] },

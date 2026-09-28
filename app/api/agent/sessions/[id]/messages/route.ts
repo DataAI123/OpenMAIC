@@ -89,7 +89,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
 
     try {
       const materials = materialIds.length
-        ? await bindOwnerMaterialsToSession(id, ownerId, materialIds)
+        ? await bindOwnerMaterialsToSession(id, ownerId, materialIds, identity?.tenantId)
         : [];
       const posted = await store.postUserMessage(
         id,

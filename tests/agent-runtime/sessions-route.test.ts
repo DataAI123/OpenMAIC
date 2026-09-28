@@ -112,7 +112,11 @@ describe('agent session collection route', () => {
         origin: 'http://localhost',
       }),
     );
-    expect(mocks.scheduleConversationTitle).toHaveBeenCalledWith('session-1', 'anon:test', undefined);
+    expect(mocks.scheduleConversationTitle).toHaveBeenCalledWith(
+      'session-1',
+      'anon:test',
+      undefined,
+    );
   });
 
   it('does not schedule an ordinary session until its create write resolves', async () => {
@@ -138,7 +142,11 @@ describe('agent session collection route', () => {
       status: 'queued',
     });
     expect((await responsePromise).status).toBe(202);
-    expect(mocks.scheduleConversationTitle).toHaveBeenCalledWith('session-1', 'anon:test', undefined);
+    expect(mocks.scheduleConversationTitle).toHaveBeenCalledWith(
+      'session-1',
+      'anon:test',
+      undefined,
+    );
   });
 
   it('accepts a skill by its user-visible name and freezes the durable id, like the runner', async () => {
@@ -164,7 +172,11 @@ describe('agent session collection route', () => {
       { text: 'Compare this', courseRefs },
       { expectedOwnerId: 'anon:test' },
     );
-    expect(mocks.scheduleConversationTitle).toHaveBeenCalledWith('session-1', 'anon:test', undefined);
+    expect(mocks.scheduleConversationTitle).toHaveBeenCalledWith(
+      'session-1',
+      'anon:test',
+      undefined,
+    );
     await expect(response.json()).resolves.toMatchObject({
       id: 'session-1',
       status: 'queued',
@@ -179,9 +191,12 @@ describe('agent session collection route', () => {
     const response = await post({ prompt: 'Read this', materialIds: ['material-1'] });
 
     expect(response.status).toBe(202);
-    expect(mocks.bindOwnerMaterialsToSession).toHaveBeenCalledWith('session-1', 'anon:test', [
-      'material-1',
-    ]);
+    expect(mocks.bindOwnerMaterialsToSession).toHaveBeenCalledWith(
+      'session-1',
+      'anon:test',
+      ['material-1'],
+      undefined,
+    );
     expect(mocks.postUserMessage).toHaveBeenCalledWith(
       'session-1',
       {
@@ -323,7 +338,11 @@ describe('agent session collection route', () => {
       { text: 'Compare this lesson', courseRefs },
       { expectedOwnerId: 'anon:test' },
     );
-    expect(mocks.scheduleConversationTitle).toHaveBeenCalledWith('session-1', 'anon:test', undefined);
+    expect(mocks.scheduleConversationTitle).toHaveBeenCalledWith(
+      'session-1',
+      'anon:test',
+      undefined,
+    );
     expect(mocks.postUserMessage.mock.invocationCallOrder[0]).toBeLessThan(
       mocks.scheduleConversationTitle.mock.invocationCallOrder[0]!,
     );

@@ -27,15 +27,21 @@ export function attachOwnerHeaders<T extends Response>(response: T, headers: Hea
  * Returns a Response to send immediately (404 not-owned, 503 store unavailable),
  * or `null` when `ownerId` owns `jobId` and the caller may relay to the render
  * service.
+ *
+ * `tenantId`, when supplied, is part of the ownership binding: a job submitted
+ * under one tenant is invisible to the same owner under another (see
+ * {@link assertRenderJobOwnedBy}). Omitting it keeps the legacy owner-only
+ * check byte-for-byte.
  */
 export async function guardRenderJobAccess(
   jobId: string,
   ownerId: string,
   responseHeaders: Headers,
+  tenantId?: string,
 ): Promise<NextResponse | null> {
   let owned: boolean;
   try {
-    owned = await assertRenderJobOwnedBy(jobId, ownerId);
+    owned = await assertRenderJobOwnedBy(jobId, ownerId, tenantId);
   } catch (error) {
     log.error(`Failed to verify render job ownership [job=${jobId}]:`, error);
     return attachOwnerHeaders(

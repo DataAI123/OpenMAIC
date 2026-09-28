@@ -146,7 +146,9 @@ describe('POST /api/parse-pdf OIDC identity boundary', () => {
   });
 
   it('fails closed with 503 when the rate-limit store is unavailable', async () => {
-    mocks.consumeActionRateLimit.mockRejectedValue(new Error('USER_API_RATE_LIMIT_DATABASE_UNAVAILABLE'));
+    mocks.consumeActionRateLimit.mockRejectedValue(
+      new Error('USER_API_RATE_LIMIT_DATABASE_UNAVAILABLE'),
+    );
     const { POST } = await import('@/app/api/parse-pdf/route');
     const response = await POST(request() as unknown as NextRequest);
 

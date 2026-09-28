@@ -101,8 +101,12 @@ describe('proxy-media — owner boundary (real withRequestOwnerId, stubbed sessi
       }),
     );
     // Admit the request: the upsert returns the window start date.
-    mocks.rateLimitQuery.mockReset().mockResolvedValue({ rows: [{ window_started_at: new Date() }] });
-    mocks.getServerPersistenceProvider.mockReset().mockResolvedValue({ pool: { query: mocks.rateLimitQuery } });
+    mocks.rateLimitQuery
+      .mockReset()
+      .mockResolvedValue({ rows: [{ window_started_at: new Date() }] });
+    mocks.getServerPersistenceProvider
+      .mockReset()
+      .mockResolvedValue({ pool: { query: mocks.rateLimitQuery } });
     vi.stubEnv('DATABASE_URL', 'postgres://rate-limit.test/openmaic');
   });
 
@@ -210,7 +214,9 @@ describe('proxy-media — owner boundary (real withRequestOwnerId, stubbed sessi
     const res = await (await importPost())(proxyRequest('https://openmaic.example.com'));
 
     expect(res.status).toBe(200);
-    expect(mocks.getServerPersistenceProvider).toHaveBeenCalledWith('postgres://rate-limit.test/openmaic');
+    expect(mocks.getServerPersistenceProvider).toHaveBeenCalledWith(
+      'postgres://rate-limit.test/openmaic',
+    );
     const [sql, params] = mocks.rateLimitQuery.mock.calls[0];
     expect(sql).toContain('user_api_rate_limits');
     expect(params[1]).toBe('proxy_media');

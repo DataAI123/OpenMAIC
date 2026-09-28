@@ -32,6 +32,15 @@ function routePath(file) {
 }
 
 function currentIdentity(source, route, method) {
+  if (route === '/tenant/active') {
+    return '自作用域活跃租户切换：应用会话（数据库复核，允许 tenant-required）+ 存储内成员关系复核；不接受未具备成员资格的租户';
+  }
+  if (route === '/tenant/leave') {
+    return '自作用域退出本租户：应用会话（数据库复核，允许 tenant-required）；userId 取自 session，从不取输入';
+  }
+  if (route === '/tenant') {
+    return '自作用域租户列表：应用会话（数据库复核，允许 tenant-required）；按 session userId 查询，从不接受输入';
+  }
   if (route.startsWith('/tenant/')) {
     return 'OIDC 租户管理边界：应用会话（数据库复核）+ 权限矩阵判定；租户与操作者均取自 session，不接受调用方输入';
   }
@@ -73,10 +82,22 @@ function policyFor(route, method) {
     return '租户成员读取：签名应用会话 + tenant.member.read 权限（owner/admin）；member/viewer 403 且不触达存储；租户取自 session；响应 private,no-store；OIDC 入口已按精确 GET 开放（批次15），其它方法/子路径保持 503';
   }
   if (route === '/tenant/members/:userId') {
-    return '租户角色绑定（迁移 0017）：签名应用会话 + tenant.member.manage 权限 + 同源写入；事务内按租户 advisory lock 串行化，秩守卫禁止越权授予/降级同秩、保护最后一个 active owner（409），未知/停用 subject 与移除时本租户无成员关系者统一 404 无 oracle；每次实际变更写 tenant_role_audit（source=api）；响应 private,no-store；OIDC 入口已按精确 PUT/DELETE 开放（批次15），其它方法/子路径保持 503';
+    return '租户成员与角色管理（迁移 0017）：签名应用会话 + tenant.member.manage 权限 + 同源写入；事务内按租户 advisory lock 串行化，秩守卫禁止越权授予/降级同秩、保护最后一个 active owner（409），未知/停用 subject 与移除时本租户无成员关系者统一 404 无 oracle；每次实际变更写 tenant_role_audit（source=api）；PUT 绑定角色、PATCH 暂停/恢复成员、DELETE 移除；响应 private,no-store；OIDC 入口已按精确 PUT/PATCH/DELETE 开放（批次15/19），其它方法/子路径保持 503';
   }
   if (route === '/tenant/audit') {
     return '租户角色变更审计读取：签名应用会话 + tenant.audit.read 权限（owner/admin）；member/viewer 403；租户取自 session；limit 有界（默认 50、上限 200）；响应 private,no-store；OIDC 入口已按精确 GET 开放（批次15），其它方法/子路径保持 503';
+  }
+  if (route === '/tenant/active') {
+    return '活跃租户选择：签名应用会话（允许 tenant-required 状态）+ 写方法同源校验 + 存储内复核目标成员关系；切换到当前租户为幂等 no-op（不写审计）；租户取自 session/输入但必须已具备成员资格；响应 private,no-store；OIDC 入口已按精确 POST 开放（批次17），其它方法/子路径保持 503';
+  }
+  if (route === '/tenant/leave') {
+    return '退出本租户：签名应用会话（允许 tenant-required）+ 自作用域（userId 取自 session，从不取输入）；存储拒绝末位 active owner（409）、非本租户 active 成员统一 404 无 oracle，并解除该用户会话的活动租户钉定；响应 private,no-store；OIDC 入口已按精确 POST 开放（批次19），其它方法/子路径保持 503';
+  }
+  if (route === '/tenant') {
+    return '本人租户列表：签名应用会话（允许 tenant-required）+ 自作用域（按 session userId 查询，从不接受输入），不枚举他人成员关系；每项携带租户 status；响应 private,no-store；OIDC 入口已按精确 GET 开放（批次18），其它方法/子路径保持 503';
+  }
+  if (route === '/tenant/:tenantId') {
+    return '租户改名/停用/启用：签名应用会话 + owner-only tenant.settings.manage 权限 + 同源写入；路径租户必须等于 session 当前租户（其它/未知一律 404 无 oracle），admin 被拒于触达存储之前；每次实际变更写 tenant_role_audit（source=api）；响应 private,no-store；OIDC 入口已按精确 PATCH 开放（批次18），其它方法/子路径保持 503';
   }
   if (route === '/azure-voices') {
     return 'BYOK Azure Speech voice-list 查询：OIDC handler 要求数据库-backed 用户 session 和非 viewer 写操作边界、PostgreSQL 5 次/60 秒用户限流、16 KiB 请求和 1 MiB 响应上限；只允许官方 Azure Speech regional/resource 主机、HTTPS 默认端口、根路径及固定 voice-list GET，连接时 DNS 固定公网地址；不合成音频。legacy 保留原自定义 endpoint 行为；0001–0004 已通过隔离 PG16.15 migrator/恢复演练；OIDC 入口已按精确 POST 开放（批次7），其它方法/子路径保持 503';
@@ -189,14 +210,29 @@ function oidcGateFor(route, method) {
   if (route === '/tenant/members' && method === 'GET') {
     return '精确 GET（批次15 已验收）：签名应用会话 + withTenantPermission 的 tenant.member.read 判定（未登 401 并清除失效 cookie、存储不可用 503、非 OIDC 503 fail-closed；member/viewer 403）；租户取自 session，只列本租户成员；响应 private,no-store；其它方法/子路径保持 503';
   }
-  if (route === '/tenant/members/:userId' && (method === 'PUT' || method === 'DELETE')) {
-    return '精确 PUT/DELETE（批次15 已验收）：签名应用会话 + withTenantPermission 的 tenant.member.manage 判定（未登 401、member/viewer 403）+ 写方法同源校验（跨 Origin 403 INVALID_ORIGIN）；事务内按租户 advisory lock 串行化，秩守卫拒绝越权授予与同秩降级，保护最后一个 active owner（409），跨租户/未知/停用 subject 统一 404 无 oracle；实际变更写 tenant_role_audit（source=api，迁移 0017）；响应 private,no-store；其它方法/子路径保持 503';
+  if (
+    route === '/tenant/members/:userId' &&
+    (method === 'PUT' || method === 'PATCH' || method === 'DELETE')
+  ) {
+    return '精确 PUT/PATCH/DELETE（批次15/19 已验收）：签名应用会话 + withTenantPermission 的 tenant.member.manage 判定（未登 401、member/viewer 403）+ 写方法同源校验（跨 Origin 403 INVALID_ORIGIN）；事务内按租户 advisory lock 串行化，秩守卫拒绝越权授予与同秩降级，保护最后一个 active owner（409），跨租户/未知/停用 subject 统一 404 无 oracle；实际变更写 tenant_role_audit（source=api，迁移 0017）；PUT 绑定角色、PATCH 暂停/恢复成员、DELETE 移除；响应 private,no-store；其它方法/子路径保持 503';
   }
   if (route === '/tenant/audit' && method === 'GET') {
     return '精确 GET（批次15 已验收）：签名应用会话 + withTenantPermission 的 tenant.audit.read 判定（未登 401、member/viewer 403）；租户取自 session，limit 有界；响应 private,no-store；其它方法/子路径保持 503';
   }
+  if (route === '/tenant' && method === 'GET') {
+    return '精确 GET（批次18 已验收）：签名应用会话（允许 tenant-required）+ 自作用域（按 session userId 查询）；只列本人成员关系及租户 status，不枚举他人；响应 private,no-store；其它方法保持 503';
+  }
+  if (route === '/tenant/:tenantId' && method === 'PATCH') {
+    return '精确 PATCH（批次18 已验收）：签名应用会话 + owner-only tenant.settings.manage；路径租户必须等于 session 当前租户（其它/未知一律 404 无 oracle）+ 写方法同源校验；每次实际变更写 tenant_role_audit（source=api）；响应 private,no-store；其它方法/子路径保持 503';
+  }
+  if (route === '/tenant/active' && method === 'POST') {
+    return '精确 POST（批次17 已验收）：签名应用会话（允许 tenant-required）+ 同源校验 + 存储内复核目标成员关系后切换 active_tenant_id；切换到当前租户为幂等 no-op；未登 401、跨 Origin 403、非成员 404；响应 private,no-store；其它方法保持 503';
+  }
+  if (route === '/tenant/leave' && method === 'POST') {
+    return '精确 POST（批次19 已验收）：签名应用会话（允许 tenant-required）+ 自作用域（userId 取自 session）；存储拒绝末位 active owner（409）、非本租户 active 成员统一 404 无 oracle，并解除该用户会话的活动租户钉定；响应 private,no-store；其它方法保持 503';
+  }
   if (route.startsWith('/tenant/')) {
-    return 'OIDC 下 503：仅受控的成员/审计 verb+path 已开放（批次15）';
+    return 'OIDC 下 503：仅受控的成员/审计/租户设置 verb+path 已开放（批次15–19）';
   }
 
   if (route === '/parse-pdf' && method === 'POST') {

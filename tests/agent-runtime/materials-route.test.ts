@@ -86,6 +86,7 @@ function ownerMaterial(overrides: Partial<OwnerMaterialRecord> = {}): OwnerMater
   return {
     id: 'mat_00000000000000000000000000',
     ownerId: 'owner-1',
+    tenantId: null,
     kind: 'source',
     derivedFrom: null,
     mime: 'application/pdf',
@@ -239,11 +240,14 @@ describe('POST /api/materials', () => {
       '2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824',
     );
     // The object key is part of the reservation before its bytes are written,
-    // closing the crash window between the byte write and finalize.
+    // closing the crash window between the byte write and finalize. The tenant
+    // is threaded through as the optional fourth argument (undefined here, as
+    // this owner carries no tenant).
     expect(mocks.reclaimStaleOwnerMaterialUploads).toHaveBeenCalledWith(
       expect.anything(),
       'owner-1',
       expect.any(Function),
+      undefined,
     );
     const putCall = mocks.byteStore.put.mock.invocationCallOrder[0]!;
     const finalizeCall = mocks.finalizeOwnerMaterial.mock.invocationCallOrder[0]!;

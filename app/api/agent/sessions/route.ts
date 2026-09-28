@@ -165,7 +165,7 @@ export async function POST(req: NextRequest) {
     try {
       const openingText = existingCourse ? explicitPrompt : prompt;
       const materials = materialIds.length
-        ? await bindOwnerMaterialsToSession(meta.id, ownerId, materialIds)
+        ? await bindOwnerMaterialsToSession(meta.id, ownerId, materialIds, identity?.tenantId)
         : [];
       await store.postUserMessage(
         meta.id,
