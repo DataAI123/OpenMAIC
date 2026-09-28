@@ -5,8 +5,16 @@ import { getServerPersistenceProvider } from '@/lib/persistence/server-provider'
 
 const USER_OWNER_PREFIX = 'user:';
 
+/**
+ * Controlled tenant every quota row written without an explicit tenant belongs
+ * to (the single-tenant era, and the phase-1 mapping in `usage-attribution`).
+ * Mirrors the `default` sentinel migration 0022 backfills existing rows with.
+ */
+export const DEFAULT_QUOTA_TENANT = 'default';
+
 interface ReservationRow {
   id: string;
+  tenant_id: string;
   user_id: string;
   period_start: Date | string;
   reserved_tokens: string | number;
@@ -44,6 +52,13 @@ function parseAmount(value: number, label: string, allowZero = false): bigint {
     );
   }
   return BigInt(value);
+}
+
+function parseTenant(tenantId: string): string {
+  if (typeof tenantId !== 'string' || tenantId.length === 0) {
+    throw new TypeError('tenantId must be a non-empty string');
+  }
+  return tenantId;
 }
 
 /** UTC calendar month, matching the monthly usage log boundary. */
@@ -88,20 +103,27 @@ export async function renewPersonalLlmTokenReservation(reservationId: string): P
 /**
  * Atomically reserve a bounded LLM token amount. Callers must reserve an upper
  * bound before contacting a provider; a failed reservation must not proceed.
+ *
+ * The monthly counter is keyed by `(tenant, userId, period)`: a user who belongs
+ * to two tenants draws two independent budgets. Omitting `tenantId` (a legacy
+ * single-tenant caller) keeps the previous behaviour by falling back to the
+ * controlled `default` tenant.
  */
 export async function reservePersonalLlmTokens(
   ownerId: string,
   reserveTokens: number,
   now = new Date(),
+  tenantId: string = DEFAULT_QUOTA_TENANT,
 ): Promise<LlmQuotaReservation> {
   const userId = parseOwner(ownerId);
+  const tenant = parseTenant(tenantId);
   const amount = parseAmount(reserveTokens, 'reserveTokens');
   const periodStart = llmQuotaPeriodStart(now);
   const id = randomUUID();
 
   return withTransaction(async (client) => {
     await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [
-      `${userId}:${periodStart}:llm`,
+      `${tenant}:${userId}:${periodStart}:llm`,
     ]);
     const policy = await client.query<{ limit_amount: string | number }>(
       `SELECT limit_amount
@@ -112,33 +134,33 @@ export async function reservePersonalLlmTokens(
     if (limit === undefined) throw new Error('PERSONAL_LLM_QUOTA_POLICY_UNAVAILABLE');
 
     await client.query(
-      `INSERT INTO personal_usage_quota_months (user_id, period_start, limit_tokens)
-       VALUES ($1, $2::date, $3::bigint)
-       ON CONFLICT (user_id, period_start) DO UPDATE
+      `INSERT INTO personal_usage_quota_months (tenant_id, user_id, period_start, limit_tokens)
+       VALUES ($1, $2, $3::date, $4::bigint)
+       ON CONFLICT (tenant_id, user_id, period_start) DO UPDATE
          SET limit_tokens = EXCLUDED.limit_tokens, updated_at = CURRENT_TIMESTAMP`,
-      [userId, periodStart, String(limit)],
+      [tenant, userId, periodStart, String(limit)],
     );
 
     const reclaimed = await client.query<{ released_tokens: string }>(
       `WITH expired AS (
          UPDATE personal_usage_quota_reservations
             SET status = 'expired', completed_at = CURRENT_TIMESTAMP
-          WHERE user_id = $1 AND period_start = $2::date
+          WHERE tenant_id = $1 AND user_id = $2 AND period_start = $3::date
             AND status = 'reserved' AND lease_expires_at <= CURRENT_TIMESTAMP
           RETURNING reserved_tokens
        )
        SELECT COALESCE(SUM(reserved_tokens), 0)::text AS released_tokens FROM expired`,
-      [userId, periodStart],
+      [tenant, userId, periodStart],
     );
     const releasedTokens = BigInt(reclaimed.rows[0]?.released_tokens ?? '0');
     if (releasedTokens > BigInt(0)) {
       const reclaimedCounter = await client.query(
         `UPDATE personal_usage_quota_months
-            SET reserved_tokens = reserved_tokens - $3::bigint,
+            SET reserved_tokens = reserved_tokens - $4::bigint,
                 updated_at = CURRENT_TIMESTAMP
-          WHERE user_id = $1 AND period_start = $2::date
-            AND reserved_tokens >= $3::bigint`,
-        [userId, periodStart, releasedTokens.toString()],
+          WHERE tenant_id = $1 AND user_id = $2 AND period_start = $3::date
+            AND reserved_tokens >= $4::bigint`,
+        [tenant, userId, periodStart, releasedTokens.toString()],
       );
       if (reclaimedCounter.rowCount !== 1) {
         throw new Error('PERSONAL_LLM_QUOTA_COUNTER_INVARIANT_FAILED');
@@ -147,20 +169,20 @@ export async function reservePersonalLlmTokens(
 
     const updated = await client.query(
       `UPDATE personal_usage_quota_months
-          SET reserved_tokens = reserved_tokens + $3::bigint,
+          SET reserved_tokens = reserved_tokens + $4::bigint,
               updated_at = CURRENT_TIMESTAMP
-        WHERE user_id = $1 AND period_start = $2::date
-          AND used_tokens + reserved_tokens + $3::bigint <= limit_tokens
+        WHERE tenant_id = $1 AND user_id = $2 AND period_start = $3::date
+          AND used_tokens + reserved_tokens + $4::bigint <= limit_tokens
         RETURNING user_id`,
-      [userId, periodStart, amount.toString()],
+      [tenant, userId, periodStart, amount.toString()],
     );
     if (updated.rowCount !== 1) throw new PersonalLlmQuotaExceededError();
 
     await client.query(
       `INSERT INTO personal_usage_quota_reservations
-         (id, user_id, period_start, reserved_tokens)
-       VALUES ($1::uuid, $2, $3::date, $4::bigint)`,
-      [id, userId, periodStart, amount.toString()],
+         (id, tenant_id, user_id, period_start, reserved_tokens)
+       VALUES ($1::uuid, $2, $3, $4::date, $5::bigint)`,
+      [id, tenant, userId, periodStart, amount.toString()],
     );
     return { id, ownerId, periodStart, reservedTokens: reserveTokens };
   });
@@ -174,7 +196,7 @@ export async function settlePersonalLlmTokens(
   const actual = parseAmount(actualTokens, 'actualTokens', true);
   await withTransaction(async (client) => {
     const result = await client.query<ReservationRow>(
-      `SELECT id, user_id, period_start, reserved_tokens, status, actual_tokens
+      `SELECT id, tenant_id, user_id, period_start, reserved_tokens, status, actual_tokens
          FROM personal_usage_quota_reservations
         WHERE id = $1::uuid FOR UPDATE`,
       [reservationId],
@@ -199,18 +221,30 @@ export async function settlePersonalLlmTokens(
       reservation.status === 'reserved'
         ? await client.query(
             `UPDATE personal_usage_quota_months
-                SET reserved_tokens = reserved_tokens - $3::bigint,
-                    used_tokens = used_tokens + $4::bigint,
+                SET reserved_tokens = reserved_tokens - $4::bigint,
+                    used_tokens = used_tokens + $5::bigint,
                     updated_at = CURRENT_TIMESTAMP
-              WHERE user_id = $1 AND period_start = $2::date AND reserved_tokens >= $3::bigint`,
-            [reservation.user_id, reservation.period_start, reserved.toString(), actual.toString()],
+              WHERE tenant_id = $1 AND user_id = $2 AND period_start = $3::date
+                AND reserved_tokens >= $4::bigint`,
+            [
+              reservation.tenant_id,
+              reservation.user_id,
+              reservation.period_start,
+              reserved.toString(),
+              actual.toString(),
+            ],
           )
         : await client.query(
             `UPDATE personal_usage_quota_months
-                SET used_tokens = used_tokens + $3::bigint,
+                SET used_tokens = used_tokens + $4::bigint,
                     updated_at = CURRENT_TIMESTAMP
-              WHERE user_id = $1 AND period_start = $2::date`,
-            [reservation.user_id, reservation.period_start, actual.toString()],
+              WHERE tenant_id = $1 AND user_id = $2 AND period_start = $3::date`,
+            [
+              reservation.tenant_id,
+              reservation.user_id,
+              reservation.period_start,
+              actual.toString(),
+            ],
           );
     if (counterUpdate.rowCount !== 1)
       throw new Error('PERSONAL_LLM_QUOTA_COUNTER_INVARIANT_FAILED');
@@ -228,7 +262,7 @@ export async function settlePersonalLlmTokens(
 export async function releasePersonalLlmTokens(reservationId: string): Promise<void> {
   await withTransaction(async (client) => {
     const result = await client.query<ReservationRow>(
-      `SELECT id, user_id, period_start, reserved_tokens, status, actual_tokens
+      `SELECT id, tenant_id, user_id, period_start, reserved_tokens, status, actual_tokens
          FROM personal_usage_quota_reservations
         WHERE id = $1::uuid FOR UPDATE`,
       [reservationId],
@@ -242,10 +276,11 @@ export async function releasePersonalLlmTokens(reservationId: string): Promise<v
     const reserved = BigInt(reservation.reserved_tokens);
     const counterUpdate = await client.query(
       `UPDATE personal_usage_quota_months
-          SET reserved_tokens = reserved_tokens - $3::bigint,
+          SET reserved_tokens = reserved_tokens - $4::bigint,
               updated_at = CURRENT_TIMESTAMP
-        WHERE user_id = $1 AND period_start = $2::date AND reserved_tokens >= $3::bigint`,
-      [reservation.user_id, reservation.period_start, reserved.toString()],
+        WHERE tenant_id = $1 AND user_id = $2 AND period_start = $3::date
+          AND reserved_tokens >= $4::bigint`,
+      [reservation.tenant_id, reservation.user_id, reservation.period_start, reserved.toString()],
     );
     if (counterUpdate.rowCount !== 1)
       throw new Error('PERSONAL_LLM_QUOTA_COUNTER_INVARIANT_FAILED');

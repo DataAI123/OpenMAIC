@@ -352,7 +352,7 @@ describe('LLM thinking provider options', () => {
     );
 
     expect(quotaMock.reserve).toHaveBeenCalledOnce();
-    expect(quotaMock.reserve).toHaveBeenCalledWith('user:alice', 1_050_000);
+    expect(quotaMock.reserve).toHaveBeenCalledWith('user:alice', 1_050_000, undefined, 'default');
     expect(quotaMock.settle).toHaveBeenCalledWith('reservation-1050000', 19);
     await vi.waitFor(() => expect(usageMock.recordUsage).toHaveBeenCalledOnce());
   });
@@ -553,7 +553,7 @@ describe('LLM thinking provider options', () => {
 
     expect(result).toBe(streamResult);
     expect(wrapped.maxRetries).toBe(0);
-    expect(quotaMock.reserve).toHaveBeenCalledWith('user:alice', 1_050_000);
+    expect(quotaMock.reserve).toHaveBeenCalledWith('user:alice', 1_050_000, undefined, 'default');
     expect(quotaMock.settle).toHaveBeenCalledWith('reservation-1050000', 13);
   });
 

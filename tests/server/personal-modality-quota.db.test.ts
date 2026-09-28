@@ -5,10 +5,10 @@
  * modality, amount) and `generate-routes-quota.test.ts` drives the routes with
  * the engine mocked. Neither exercises the real SQL state machine. This suite
  * runs the actual reserve/settle/release/reclaim queries against a PGlite
- * Postgres with migrations 0001 + 0006 applied, so the advisory-lock reserve,
- * the `rowCount === 1` "did the guarded UPDATE match?" checks, the expired-lease
- * reclaim, the `actual > reserved` full-charge and the idempotent-settle
- * behaviour are all verified for real rather than mocked away.
+ * Postgres with migrations 0001 + 0002 + 0006 + 0022 applied, so the
+ * advisory-lock reserve, the `rowCount === 1` "did the guarded UPDATE match?"
+ * checks, the expired-lease reclaim, the `actual > reserved` full-charge and the
+ * idempotent-settle behaviour are all verified for real rather than mocked away.
  */
 
 import { readFile } from 'node:fs/promises';
@@ -61,6 +61,16 @@ async function month(modality: string) {
   return rows[0];
 }
 
+async function tenantMonth(tenant: string, modality: string) {
+  const { rows } = await state.db.query<{ used_amount: string; reserved_amount: string }>(
+    `SELECT used_amount::text AS used_amount, reserved_amount::text AS reserved_amount
+       FROM personal_media_quota_months
+      WHERE tenant_id = $1 AND user_id = $2 AND period_start = $3::date AND modality = $4`,
+    [tenant, USER_ID, PERIOD, modality],
+  );
+  return rows[0];
+}
+
 async function reservationStatus(id: string) {
   const { rows } = await state.db.query<{ status: string }>(
     `SELECT status FROM personal_media_quota_reservations WHERE id = $1::uuid`,
@@ -92,7 +102,20 @@ beforeAll(async () => {
     await readFile(path.join(process.cwd(), 'migrations', '0001_enterprise_identity.sql'), 'utf8'),
   );
   await state.db.exec(
+    await readFile(
+      path.join(process.cwd(), 'migrations', '0002_personal_llm_monthly_quota.sql'),
+      'utf8',
+    ),
+  );
+  await state.db.exec(
     await readFile(path.join(process.cwd(), 'migrations', '0006_personal_media_quota.sql'), 'utf8'),
+  );
+  // 0022 re-keys both quota families, so the LLM tables must exist too.
+  await state.db.exec(
+    await readFile(
+      path.join(process.cwd(), 'migrations', '0022_quota_tenant_boundaries.sql'),
+      'utf8',
+    ),
   );
 
   const engine = await import('@/lib/server/personal-modality-quota');
@@ -192,5 +215,55 @@ describe('personal media quota engine (real SQL)', () => {
     await expect(renew(res.id)).rejects.toThrow(/LEASE_LOST/);
     // A missing reservation id is likewise a lost lease, never a silent success.
     await expect(renew('00000000-0000-0000-0000-000000000000')).rejects.toThrow(/LEASE_LOST/);
+  });
+
+  it('keeps two tenants of the same user on independent monthly budgets', async () => {
+    // The 2000-image limit is per (tenant, user): 1500 in tenant-a and 1500 in
+    // tenant-b both succeed, where a shared budget would refuse the second.
+    const a = await reserve(OWNER_ID, 'image', 1500, NOW, 'tenant-a');
+    const b = await reserve(OWNER_ID, 'image', 1500, NOW, 'tenant-b');
+    expect(a.reservedAmount).toBe(1500);
+    expect(b.reservedAmount).toBe(1500);
+    expect(await tenantMonth('tenant-a', 'image')).toEqual({
+      used_amount: '0',
+      reserved_amount: '1500',
+    });
+    expect(await tenantMonth('tenant-b', 'image')).toEqual({
+      used_amount: '0',
+      reserved_amount: '1500',
+    });
+
+    // tenant-a is full (1500 + 600 > 2000) while tenant-b still has room.
+    await expect(reserve(OWNER_ID, 'image', 600, NOW, 'tenant-a')).rejects.toBeInstanceOf(
+      ExceededError,
+    );
+    const c = await reserve(OWNER_ID, 'image', 100, NOW, 'tenant-b');
+    expect(c.reservedAmount).toBe(100);
+    expect(await tenantMonth('tenant-b', 'image')).toEqual({
+      used_amount: '0',
+      reserved_amount: '1600',
+    });
+  });
+
+  it('settles against the reservation tenant even when another tenant shares the user', async () => {
+    const a = await reserve(OWNER_ID, 'tts', 100, NOW, 'tenant-a');
+    const b = await reserve(OWNER_ID, 'tts', 100, NOW, 'tenant-b');
+
+    await settle(a.id, 40);
+    expect(await tenantMonth('tenant-a', 'tts')).toEqual({
+      used_amount: '40',
+      reserved_amount: '0',
+    });
+    // tenant-b's counter is untouched by tenant-a's settlement.
+    expect(await tenantMonth('tenant-b', 'tts')).toEqual({
+      used_amount: '0',
+      reserved_amount: '100',
+    });
+
+    await release(b.id);
+    expect(await tenantMonth('tenant-b', 'tts')).toEqual({
+      used_amount: '0',
+      reserved_amount: '0',
+    });
   });
 });

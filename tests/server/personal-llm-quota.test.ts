@@ -23,4 +23,10 @@ describe('personal LLM quota policy', () => {
       );
     }
   });
+
+  it('rejects an empty tenant id before touching storage', async () => {
+    await expect(reservePersonalLlmTokens('user:alice', 10, new Date(), '')).rejects.toThrow(
+      /tenantId must be a non-empty string/,
+    );
+  });
 });

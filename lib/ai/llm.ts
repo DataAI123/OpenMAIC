@@ -392,7 +392,12 @@ async function createPersonalQuotaHooks(
 ): Promise<PersonalQuotaHooks | undefined> {
   if (process.env.OPENMAIC_AUTH_MODE?.trim() !== 'oidc') return undefined;
   const { currentUsageAttribution } = await import('@/lib/server/usage-attribution');
-  const ownerId = currentUsageAttribution()?.ownerId;
+  const attribution = currentUsageAttribution();
+  const ownerId = attribution?.ownerId;
+  // Same server-resolved attribution that names the owner also names the tenant,
+  // so a user who belongs to two tenants reserves against two separate monthly
+  // budgets. Absent a tenant the engine falls back to the controlled `default`.
+  const tenantId = attribution?.tenantId;
   if (!ownerId?.startsWith('user:')) {
     throw new Error('PERSONAL_LLM_QUOTA_REQUIRES_AUTHENTICATED_USER');
   }
@@ -456,10 +461,10 @@ async function createPersonalQuotaHooks(
         prepared && typeof prepared === 'object' && 'model' in prepared
           ? (prepared as { model?: unknown }).model
           : (event as { model?: unknown } | null)?.model;
-      active = await reservePersonalLlmTokens(
-        ownerId,
-        getStepContextWindow(stepModel ?? params.model),
-      );
+      const stepReservation = getStepContextWindow(stepModel ?? params.model);
+      active = tenantId
+        ? await reservePersonalLlmTokens(ownerId, stepReservation, undefined, tenantId)
+        : await reservePersonalLlmTokens(ownerId, stepReservation);
       startHeartbeat(active.id);
       return prepared;
     },

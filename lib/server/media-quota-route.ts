@@ -4,6 +4,7 @@ import {
   settlePersonalMediaQuota,
   type MediaQuotaModality,
 } from '@/lib/server/personal-modality-quota';
+import { currentUsageAttribution } from '@/lib/server/usage-attribution';
 import { createLogger } from '@/lib/logger';
 
 const log = createLogger('MediaQuotaRoute');
@@ -28,7 +29,15 @@ export async function beginMediaQuota(
 ): Promise<MediaQuotaGate> {
   if (!ownerId.startsWith('user:')) return { kind: 'skip' };
   try {
-    const reservation = await reservePersonalMediaQuota(ownerId, modality, reserveAmount);
+    // The tenant comes from the same request boundary that resolved `ownerId`
+    // (`withRequestOwnerId`), so a user acting in one tenant never draws another
+    // tenant's monthly budget. Outside an attributed scope the tenant is absent
+    // and the engine falls back to the controlled `default` tenant, keeping the
+    // legacy single-tenant reservation shape.
+    const tenantId = currentUsageAttribution()?.tenantId;
+    const reservation = tenantId
+      ? await reservePersonalMediaQuota(ownerId, modality, reserveAmount, undefined, tenantId)
+      : await reservePersonalMediaQuota(ownerId, modality, reserveAmount);
     return { kind: 'reserved', reservationId: reservation.id, reservedAmount: reserveAmount };
   } catch (error) {
     if (error instanceof PersonalMediaQuotaExceededError) return { kind: 'exceeded' };

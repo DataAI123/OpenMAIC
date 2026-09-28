@@ -40,4 +40,10 @@ describe('personal media quota guards (no database)', () => {
       /actualAmount must be a non-negative safe integer/,
     );
   });
+
+  it('rejects an empty tenant id before touching storage', async () => {
+    await expect(
+      reservePersonalMediaQuota('user:alice', 'image', 1, new Date(), ''),
+    ).rejects.toThrow(/tenantId must be a non-empty string/);
+  });
 });

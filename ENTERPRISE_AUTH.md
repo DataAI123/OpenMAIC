@@ -379,11 +379,37 @@ tenant-correct.
   reproduces the previous owner-only read byte for byte, so a legacy deployment
   keeps its deployment-wide view.
 
-**Not a boundary leak, still open:** the per-user monthly LLM token quota
-(`lib/server/personal-llm-quota`) is keyed by `user:<id>` alone, so a user's
-tenants share one budget. That is a quota/product decision rather than
-cross-tenant data access, and belongs with the operations work (quotas,
-spend caps and persistent usage).
+#### Quota / spend-cap tenant boundary (batch 25)
+
+This closes the quota residual called out after batch 24. The personal monthly
+counters — LLM tokens (`lib/server/personal-llm-quota`) and the image / video /
+TTS media modalities (`lib/server/personal-modality-quota`) — were keyed by
+`user_id` alone (+ period, + modality), so a user who belongs to two tenants
+shared one budget: exhausting the cap in one tenant silently denied the other.
+The key is now `(tenant, user, period[, modality])`, so each tenant draws its own
+allowance.
+
+- **Write / read.** Every reservation, expired-lease reclaim, counter update,
+  settlement and release carries the tenant in its predicate. The tenant comes
+  from the same server-derived attribution that names the owner — the ambient
+  attribution in `llm.ts` `createPersonalQuotaHooks`, and
+  `currentUsageAttribution()` inside `beginMediaQuota` for the generate routes
+  that run under `withRequestOwnerId` — never from request input.
+- **Fallback.** `tenantId` is an optional trailing parameter that defaults to the
+  controlled `default` tenant, so a legacy single-tenant caller keeps the exact
+  previous budget and enforcement. The reservation row stores its tenant, so
+  `settle` / `release` stay tenant-correct from the row alone.
+- **Migration 0022** adds a `NOT NULL DEFAULT 'default'` `tenant_id` to the four
+  quota tables, backfills existing rows into `default`, re-keys both month
+  primary keys and the parent foreign keys on the tenant, and rebuilds the open
+  reservation indexes with the tenant leading. It is forward-only and
+  idempotent. Unlike the resource-boundary migrations (0019-0021) the column is
+  NOT NULL rather than nullable: these tables only ever hold authenticated
+  `user:` rows (no anonymous row needs a NULL tenant), and Postgres treats NULLs
+  as distinct inside a unique constraint, which would have let two NULL rows
+  split one budget.
+- **Not a cross-tenant data-access path.** The counters were never a resource
+  read/write surface — the residual was a shared budget, now separated.
 
 #### Process-local state and cache keys: audit conclusion
 
