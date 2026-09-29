@@ -6,7 +6,11 @@ import { capBodyStream } from '@/lib/server/capped-stream';
 import { clientIdentity } from '@/lib/server/client-identity';
 import { withRequestOwnerId } from '@/lib/server/agent-runtime/with-owner';
 import { attachOwnerHeaders } from '@/lib/server/export-render-access';
-import { isSafeRenderJobId, recordRenderJobOwner } from '@/lib/server/export-render-jobs';
+import {
+  checkRenderSubmitLimit,
+  isSafeRenderJobId,
+  recordRenderJobOwner,
+} from '@/lib/server/export-render-jobs';
 import { createLogger } from '@/lib/logger';
 
 const log = createLogger('ExportVideo Render API');
@@ -35,6 +39,10 @@ const SUBMIT_TIMEOUT_MS = 300_000;
  * mapping that poll/cancel/download later enforce. If that binding cannot be
  * written, the just-created job is best-effort cancelled and the request fails
  * closed — an unbound job must never reach a client.
+ *
+ * Submits are also bounded per (owner, tenant) by a soft in-flight concurrency
+ * cap counted from those same bindings; an over-cap submit is refused with 429
+ * before any bytes reach the render service. See {@link checkRenderSubmitLimit}.
  */
 export async function POST(req: NextRequest) {
   const resolved = resolveRenderServiceUrl();
@@ -58,6 +66,34 @@ export async function POST(req: NextRequest) {
         apiError('INVALID_REQUEST', 400, 'Expected multipart/form-data'),
         responseHeaders,
       );
+    }
+
+    // Per-owner concurrency cap, checked before any bytes are forwarded so an
+    // over-cap submit costs the render service nothing. Only `user:` owners are
+    // limited: the counter is per authenticated user, and legacy anonymous
+    // deployments (all sharing one `anon:` id) keep their pre-OIDC posture —
+    // enforcing here would make every legacy user contend for one shared window.
+    // Under OIDC every submit that reaches this handler is a `user:` owner, so
+    // the cap is always enforced in enterprise mode. Fails closed: a store
+    // outage refuses the submit rather than letting an unbounded job through.
+    if (ownerId.startsWith('user:')) {
+      let limit: Awaited<ReturnType<typeof checkRenderSubmitLimit>>;
+      try {
+        limit = await checkRenderSubmitLimit(ownerId, identity?.tenantId);
+      } catch (error) {
+        log.error('Render submit concurrency check failed; refusing submit:', error);
+        return attachOwnerHeaders(
+          apiError('UPSTREAM_ERROR', 503, 'Render job concurrency check is unavailable'),
+          responseHeaders,
+        );
+      }
+      if (limit.limited) {
+        responseHeaders.set('Retry-After', String(limit.retryAfterSeconds ?? 0));
+        return attachOwnerHeaders(
+          apiError('RATE_LIMITED', 429, 'Too many concurrent render jobs'),
+          responseHeaders,
+        );
+      }
     }
 
     // Forward the raw multipart body verbatim, bounded to MAX_UPLOAD_BYTES of

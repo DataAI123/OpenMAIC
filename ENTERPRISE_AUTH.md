@@ -438,6 +438,32 @@ answered `429` to tenant B. The window is now keyed `(tenant, user, route)`.
   (keep limiting per person globally) would have left a tenant-visible coupling in
   place.
 
+#### Render-submit concurrency cap per owner and tenant (batch 27)
+
+`POST /api/export-video/render` forwards an upload to the external render
+service and binds the returned job to its owner. That submit path now carries a
+soft in-flight concurrency cap counted from those same bindings: at most
+`RENDER_SUBMIT_MAX_IN_FLIGHT` bindings created in the last fifteen minutes per
+`(owner, tenant)`, refused with `429` and `Retry-After` before any byte is
+forwarded, and `503` when the store is unavailable. The tenant is the request's
+server-derived `identity.tenantId`, never request input. Legacy `anon:` owners
+are skipped: they share one anonymous id, so enforcing here would make every
+legacy user contend for a single window.
+
+- **No new store.** The count reuses `export_render_job_owners`, which already
+  carries the tenant column and the `(tenant_id, owner_id)` index added for the
+  batch 22 resource boundary, so this increment needs no migration. An omitted
+  tenant is the legacy owner-only view (tenantless bindings included); a supplied
+  tenant counts only that tenant, matching the ownership check it mirrors.
+- **Soft by design.** Two submits racing between count and insert can both be
+  admitted, overshooting the cap by at most the number of simultaneous requests.
+  A strict cap would need a serialization point plus terminal-state updates driven
+  by polling, which clients may never do; the fifteen-minute window already bounds
+  total throughput, so the soft cap is the intended trade-off.
+- **Self-healing window.** The window is sized above a typical render lifetime, so
+  an abandoned or never-polled job ages out and stops counting — a binding cannot
+  lock its owner out permanently.
+
 #### Process-local state and cache keys: audit conclusion
 
 A sweep of process-local state and cache keys found no tenant-crossing store

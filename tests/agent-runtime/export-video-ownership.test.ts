@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
   proxyFetch: vi.fn(),
   assertRenderJobOwnedBy: vi.fn(),
   recordRenderJobOwner: vi.fn(),
+  checkRenderSubmitLimit: vi.fn(),
   cappedStream: { stream: new ReadableStream({ start: (c) => c.close() }), exceeded: () => false },
 }));
 
@@ -26,6 +27,7 @@ vi.mock('@/lib/server/client-identity', () => ({ clientIdentity: () => 'test-cli
 vi.mock('@/lib/server/export-render-jobs', () => ({
   assertRenderJobOwnedBy: mocks.assertRenderJobOwnedBy,
   recordRenderJobOwner: mocks.recordRenderJobOwner,
+  checkRenderSubmitLimit: mocks.checkRenderSubmitLimit,
   isSafeRenderJobId: (id: unknown) =>
     typeof id === 'string' &&
     id.length >= 1 &&
@@ -44,6 +46,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   mocks.providerConfigured = true;
   mocks.ownerId = 'user:owner-a';
+  mocks.checkRenderSubmitLimit.mockResolvedValue({ limited: false });
 });
 
 describe('GET poll job — ownership gates the relay', () => {
@@ -174,5 +177,39 @@ describe('POST submit — binds the job to its owner before advertising it', () 
     expect(response.status).toBe(502);
     expect(mocks.recordRenderJobOwner).not.toHaveBeenCalled();
     expect(mocks.proxyFetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('refuses an over-cap submit with 429 + Retry-After BEFORE touching the render service', async () => {
+    mocks.checkRenderSubmitLimit.mockResolvedValue({ limited: true, retryAfterSeconds: 42 });
+    const response = await submit(submitRequest());
+    expect(response.status).toBe(429);
+    expect(response.headers.get('Retry-After')).toBe('42');
+    await expect(response.json()).resolves.toMatchObject({ errorCode: 'RATE_LIMITED' });
+    expect(mocks.checkRenderSubmitLimit).toHaveBeenCalledWith('user:owner-a', undefined);
+    // No bytes forwarded, no binding written.
+    expect(mocks.proxyFetch).not.toHaveBeenCalled();
+    expect(mocks.recordRenderJobOwner).not.toHaveBeenCalled();
+  });
+
+  it('fails closed (503) without relaying when the concurrency store is unavailable', async () => {
+    mocks.checkRenderSubmitLimit.mockRejectedValue(new Error('db unavailable'));
+    const response = await submit(submitRequest());
+    expect(response.status).toBe(503);
+    expect(mocks.proxyFetch).not.toHaveBeenCalled();
+    expect(mocks.recordRenderJobOwner).not.toHaveBeenCalled();
+  });
+
+  it('skips the cap for a legacy anonymous owner and proceeds to submit', async () => {
+    mocks.ownerId = 'anon:legacy';
+    mocks.recordRenderJobOwner.mockResolvedValue(undefined);
+    mocks.proxyFetch.mockResolvedValue({
+      ok: true,
+      status: 202,
+      json: async () => ({ jobId: 'job-anon' }),
+    });
+    const response = await submit(submitRequest());
+    expect(response.status).toBe(202);
+    expect(mocks.checkRenderSubmitLimit).not.toHaveBeenCalled();
+    expect(mocks.recordRenderJobOwner).toHaveBeenCalledWith('job-anon', 'anon:legacy', undefined);
   });
 });

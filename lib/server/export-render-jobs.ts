@@ -90,6 +90,78 @@ export async function recordRenderJobOwner(
 }
 
 /**
+ * Concurrency cap for render submits, enforced on the bindings this module
+ * already records — no extra table, no job-status bookkeeping the external
+ * render service would have to feed back.
+ *
+ * The cap counts bindings created in the last {@link RENDER_SUBMIT_WINDOW_SECONDS}
+ * per (owner, tenant). The window doubles as the self-heal: it is sized above a
+ * typical render lifetime, so an abandoned or never-polled job stops counting
+ * when it ages out and cannot lock its owner out permanently.
+ *
+ * This is a SOFT cap: two submits racing between count and insert can both be
+ * admitted, exceeding the cap by at most the number of simultaneous requests.
+ * Making it strict would need a serialization point (a status column plus
+ * terminal-state updates driven by polling, which clients may never do) — not
+ * worth it for a cost/abuse bound whose window already limits total throughput.
+ */
+export const RENDER_SUBMIT_MAX_IN_FLIGHT = 3;
+export const RENDER_SUBMIT_WINDOW_SECONDS = 15 * 60;
+
+export interface RenderSubmitLimitResult {
+  /** True when the owner is already at the cap and the submit must be refused. */
+  readonly limited: boolean;
+  /** Seconds until the oldest counted binding leaves the window; only set when limited. */
+  readonly retryAfterSeconds?: number;
+}
+
+/**
+ * Whether one more render submit is allowed for this (owner, tenant), and if
+ * not, how long until the oldest counted binding exits the window.
+ *
+ * Like {@link assertRenderJobOwnedBy} this is a gate on the submit path, so a
+ * store outage throws {@link ExportRenderJobDatabaseUnavailableError} and the
+ * caller fails closed. `tenantId` scopes the count exactly as it scopes the
+ * ownership check: omitted means the legacy owner-only view (tenantless
+ * bindings included), supplied means only that tenant's bindings count.
+ */
+export async function checkRenderSubmitLimit(
+  ownerId: string,
+  tenantId?: string,
+): Promise<RenderSubmitLimitResult> {
+  if (typeof ownerId !== 'string' || ownerId.length === 0) {
+    throw new TypeError('EXPORT_RENDER_JOB_REQUIRES_OWNER');
+  }
+  const pool = await getPool();
+  const tenantFilter = tenantId === undefined ? '' : ' AND tenant_id = $2';
+  const params: (string | number)[] = tenantId === undefined ? [ownerId] : [ownerId, tenantId];
+  const result = await pool.query<{
+    active_count: number | string;
+    oldest_in_window: Date | string | null;
+  }>(
+    `WITH edge AS (
+       SELECT CURRENT_TIMESTAMP - make_interval(secs => $${params.length + 1}) AS window_start
+     )
+     SELECT COUNT(*)::int AS active_count, MIN(created_at) AS oldest_in_window
+       FROM export_render_job_owners, edge
+      WHERE owner_id = $1${tenantFilter}
+        AND created_at > edge.window_start`,
+    [...params, RENDER_SUBMIT_WINDOW_SECONDS],
+  );
+  const row = result.rows[0];
+  const activeCount = Number(row?.active_count ?? 0);
+  if (activeCount < RENDER_SUBMIT_MAX_IN_FLIGHT) return { limited: false };
+
+  const oldest = row?.oldest_in_window;
+  const oldestMs =
+    typeof oldest === 'string' ? Date.parse(oldest) : (oldest?.getTime() ?? Number.NaN);
+  const retryAfterSeconds = Number.isFinite(oldestMs)
+    ? Math.max(1, Math.ceil((oldestMs + RENDER_SUBMIT_WINDOW_SECONDS * 1000 - Date.now()) / 1000))
+    : RENDER_SUBMIT_WINDOW_SECONDS;
+  return { limited: true, retryAfterSeconds };
+}
+
+/**
  * Whether `ownerId` owns `jobId`. A malformed, foreign, or unknown id all return
  * false so callers can answer one uniform 404; only a store outage throws (the
  * caller must fail closed).

@@ -171,7 +171,7 @@ function policyFor(route, method) {
     if (route === '/export-video/capability') {
       return '渲染能力探测：仅返回 enabled/accepting，不暴露渲染服务地址或凭据；读取上游 health，仅允许已认证应用会话';
     }
-    return '视频渲染任务：app 侧已持久绑定 job→owner（迁移 0009）且入口已开放；渲染服务 job store 为进程内存，compose 关闭 per-client 活跃任务限额；终态默认保留 30 分钟；用户并发政策仍未定案';
+    return '视频渲染任务：app 侧已持久绑定 job→owner（迁移 0009）且入口已开放；渲染服务 job store 为进程内存，compose 关闭 per-client 活跃任务限额；终态默认保留 30 分钟；每 (owner,tenant) 提交并发上限 3、计数窗口 15 分钟（软上限、滑窗自愈、超限 429+Retry-After、store 不可用 503 fail-closed）';
   }
   if (route === '/usage') return '用量级：认证主体 + 用户/租户范围，不接受客户端归属';
   if (
@@ -344,7 +344,7 @@ function oidcGateFor(route, method) {
     return '精确 POST：签名应用会话 + handler 内 withRequestOwnerId 边界（非 GET/跨 Origin/ viewer 拒绝）+ 每用户分模态月额度 reserve→settle（超限 429、存储不可用 503 fail-closed）；仅创建、不按 id 读取';
   }
   if (route === '/export-video/render' && method === 'POST') {
-    return '精确 POST：签名应用会话；handler 校验 job id 形状并把 job→owner 绑定写入 app Postgres（绑定失败则取消上游、绝不广告未绑定 job）';
+    return '精确 POST：签名应用会话；转发上游前先按 (owner,tenant) 计滑窗在途 job 数（上限 3、窗口 15 分钟），超限 429+Retry-After、store 不可用 503 fail-closed、legacy anon owner 跳过；随后校验 job id 形状并把 job→owner 绑定写入 app Postgres（绑定失败则取消上游、绝不广告未绑定 job）';
   }
   if (
     (route === '/export-video/render/:jobId' && (method === 'GET' || method === 'DELETE')) ||

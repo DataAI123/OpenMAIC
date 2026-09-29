@@ -41,6 +41,9 @@ const OTHER = 'user:owner-b';
 let recordRenderJobOwner: typeof import('@/lib/server/export-render-jobs').recordRenderJobOwner;
 let assertRenderJobOwnedBy: typeof import('@/lib/server/export-render-jobs').assertRenderJobOwnedBy;
 let isSafeRenderJobId: typeof import('@/lib/server/export-render-jobs').isSafeRenderJobId;
+let checkRenderSubmitLimit: typeof import('@/lib/server/export-render-jobs').checkRenderSubmitLimit;
+let RENDER_SUBMIT_MAX_IN_FLIGHT: typeof import('@/lib/server/export-render-jobs').RENDER_SUBMIT_MAX_IN_FLIGHT;
+let RENDER_SUBMIT_WINDOW_SECONDS: typeof import('@/lib/server/export-render-jobs').RENDER_SUBMIT_WINDOW_SECONDS;
 let DbUnavailable: typeof import('@/lib/server/export-render-jobs').ExportRenderJobDatabaseUnavailableError;
 
 beforeAll(async () => {
@@ -61,6 +64,9 @@ beforeAll(async () => {
   recordRenderJobOwner = engine.recordRenderJobOwner;
   assertRenderJobOwnedBy = engine.assertRenderJobOwnedBy;
   isSafeRenderJobId = engine.isSafeRenderJobId;
+  checkRenderSubmitLimit = engine.checkRenderSubmitLimit;
+  RENDER_SUBMIT_MAX_IN_FLIGHT = engine.RENDER_SUBMIT_MAX_IN_FLIGHT;
+  RENDER_SUBMIT_WINDOW_SECONDS = engine.RENDER_SUBMIT_WINDOW_SECONDS;
   DbUnavailable = engine.ExportRenderJobDatabaseUnavailableError;
 });
 
@@ -148,5 +154,53 @@ describe('export render job ownership engine (real SQL)', () => {
     await recordRenderJobOwner('job-legacy', OWNER);
     expect(await assertRenderJobOwnedBy('job-legacy', OWNER)).toBe(true);
     expect(await assertRenderJobOwnedBy('job-legacy', OWNER, 'tenant-a')).toBe(false);
+  });
+});
+
+describe('render submit concurrency cap (real SQL)', () => {
+  async function seedBindings(count: number, tenantId?: string, prefix = 'job') {
+    for (let i = 0; i < count; i++) {
+      await recordRenderJobOwner(`${prefix}-${tenantId ?? 'na'}-${i}`, OWNER, tenantId);
+    }
+  }
+
+  it('allows submits below the cap and refuses at the cap with a bounded Retry-After', async () => {
+    expect(await checkRenderSubmitLimit(OWNER)).toEqual({ limited: false });
+    await seedBindings(RENDER_SUBMIT_MAX_IN_FLIGHT - 1);
+    expect((await checkRenderSubmitLimit(OWNER)).limited).toBe(false);
+
+    await seedBindings(1, undefined, 'job-cap');
+    const atCap = await checkRenderSubmitLimit(OWNER);
+    expect(atCap.limited).toBe(true);
+    expect(atCap.retryAfterSeconds).toBeGreaterThanOrEqual(1);
+    expect(atCap.retryAfterSeconds).toBeLessThanOrEqual(RENDER_SUBMIT_WINDOW_SECONDS);
+  });
+
+  it('scopes the cap per tenant: one tenant at cap does not block another', async () => {
+    await seedBindings(RENDER_SUBMIT_MAX_IN_FLIGHT, 'tenant-a');
+    expect((await checkRenderSubmitLimit(OWNER, 'tenant-a')).limited).toBe(true);
+    expect((await checkRenderSubmitLimit(OWNER, 'tenant-b')).limited).toBe(false);
+  });
+
+  it('self-heals: a binding aged past the window stops counting', async () => {
+    await seedBindings(RENDER_SUBMIT_MAX_IN_FLIGHT);
+    expect((await checkRenderSubmitLimit(OWNER)).limited).toBe(true);
+    // Age the oldest binding beyond the window; the count drops below the cap.
+    await state.db.exec(
+      `UPDATE export_render_job_owners
+          SET created_at = CURRENT_TIMESTAMP - INTERVAL '30 minutes'
+        WHERE job_id = 'job-na-0'`,
+    );
+    expect((await checkRenderSubmitLimit(OWNER)).limited).toBe(false);
+  });
+
+  it('fails closed when the store is unavailable', async () => {
+    const saved = process.env.DATABASE_URL;
+    delete process.env.DATABASE_URL;
+    try {
+      await expect(checkRenderSubmitLimit(OWNER)).rejects.toBeInstanceOf(DbUnavailable);
+    } finally {
+      process.env.DATABASE_URL = saved;
+    }
   });
 });
