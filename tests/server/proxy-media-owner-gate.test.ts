@@ -219,9 +219,13 @@ describe('proxy-media — owner boundary (real withRequestOwnerId, stubbed sessi
     );
     const [sql, params] = mocks.rateLimitQuery.mock.calls[0];
     expect(sql).toContain('user_api_rate_limits');
-    expect(params[1]).toBe('proxy_media');
+    // The window is keyed `(tenant, user, route)`: the session's tenant leads,
+    // then the user, then the route key.
+    expect(params[0]).toBe('default');
+    expect(params[1]).toBe('internal-42');
+    expect(params[2]).toBe('proxy_media');
     // The media proxy's own ceiling, not the shared 5-req action budget.
-    expect(params[2]).toBe(60);
+    expect(params[3]).toBe(60);
     expect(mocks.rateLimitQuery.mock.invocationCallOrder[0]).toBeLessThan(
       mocks.fetch.mock.invocationCallOrder[0],
     );

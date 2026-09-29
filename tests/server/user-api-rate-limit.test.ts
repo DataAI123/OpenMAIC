@@ -28,7 +28,7 @@ describe('Azure voices user API rate limit', () => {
     await expect(consumeAzureVoicesRateLimit('user:internal-user')).resolves.toBeUndefined();
 
     expect(mocks.query).toHaveBeenCalledOnce();
-    expect(mocks.query.mock.calls[0]?.[1]).toEqual(['internal-user', 'azure_voices', 5]);
+    expect(mocks.query.mock.calls[0]?.[1]).toEqual(['default', 'internal-user', 'azure_voices', 5]);
   });
 
   it('rejects legacy anonymous owners before database access', async () => {
@@ -76,7 +76,12 @@ describe('PDF provider verification user API rate limit', () => {
     ).resolves.toBeUndefined();
 
     expect(mocks.query).toHaveBeenCalledOnce();
-    expect(mocks.query.mock.calls[0]?.[1]).toEqual(['internal-user', 'verify_pdf_provider', 5]);
+    expect(mocks.query.mock.calls[0]?.[1]).toEqual([
+      'default',
+      'internal-user',
+      'verify_pdf_provider',
+      5,
+    ]);
   });
 });
 
@@ -102,7 +107,12 @@ describe('Image provider verification user API rate limit', () => {
     ).resolves.toBeUndefined();
 
     expect(mocks.query).toHaveBeenCalledOnce();
-    expect(mocks.query.mock.calls[0]?.[1]).toEqual(['internal-user', 'verify_image_provider', 5]);
+    expect(mocks.query.mock.calls[0]?.[1]).toEqual([
+      'default',
+      'internal-user',
+      'verify_image_provider',
+      5,
+    ]);
   });
 });
 
@@ -128,7 +138,12 @@ describe('Video provider verification user API rate limit', () => {
     ).resolves.toBeUndefined();
 
     expect(mocks.query).toHaveBeenCalledOnce();
-    expect(mocks.query.mock.calls[0]?.[1]).toEqual(['internal-user', 'verify_video_provider', 5]);
+    expect(mocks.query.mock.calls[0]?.[1]).toEqual([
+      'default',
+      'internal-user',
+      'verify_video_provider',
+      5,
+    ]);
   });
 });
 
@@ -153,7 +168,28 @@ describe('Action route user API rate limit', () => {
     ).resolves.toBeUndefined();
 
     expect(mocks.query).toHaveBeenCalledOnce();
-    expect(mocks.query.mock.calls[0]?.[1]).toEqual(['internal-user', 'pbl_v2_instructor', 5]);
+    expect(mocks.query.mock.calls[0]?.[1]).toEqual([
+      'default',
+      'internal-user',
+      'pbl_v2_instructor',
+      5,
+    ]);
+  });
+
+  it('keys the window by the request tenant when the attribution carries one', async () => {
+    const { consumeActionRateLimit } = await import('@/lib/server/user-api-rate-limit');
+    const { runWithUsageAttribution } = await import('@/lib/server/usage-attribution');
+
+    await runWithUsageAttribution({ ownerId: 'user:internal-user', tenantId: 'tenant-a' }, () =>
+      consumeActionRateLimit('user:internal-user', 'pbl_v2_instructor'),
+    );
+
+    expect(mocks.query.mock.calls[0]?.[1]).toEqual([
+      'tenant-a',
+      'internal-user',
+      'pbl_v2_instructor',
+      5,
+    ]);
   });
 
   it('skips legacy anonymous owners before database access', async () => {

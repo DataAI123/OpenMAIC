@@ -1,6 +1,16 @@
 import { getServerPersistenceProvider } from '@/lib/persistence/server-provider';
+import { currentUsageAttribution } from '@/lib/server/usage-attribution';
 
 const USER_OWNER_PREFIX = 'user:';
+
+/**
+ * Controlled tenant a rate-limit row is written to when the caller carries no
+ * attribution (legacy deployments, or a request handled outside the owner
+ * boundary). Mirrors the `default` sentinel migration 0023 backfills existing
+ * rows with.
+ */
+export const DEFAULT_RATE_LIMIT_TENANT = 'default';
+
 const PROBE_ROUTE_KEY = 'provider_probe_models';
 const VERIFY_MODEL_ROUTE_KEY = 'verify_model';
 const AZURE_VOICES_ROUTE_KEY = 'azure_voices';
@@ -57,7 +67,7 @@ export class UserApiRateLimitExceededError extends Error {
   }
 }
 
-/** Atomically allow at most five model probes per user in each 60-second window. */
+/** Atomically allow at most five model probes per user per tenant in each 60-second window. */
 export async function consumeProbeRateLimit(ownerId: string): Promise<void> {
   return consumeUserApiRateLimit(ownerId, PROBE_ROUTE_KEY);
 }
@@ -66,17 +76,17 @@ export async function consumeModelVerificationRateLimit(ownerId: string): Promis
   return consumeUserApiRateLimit(ownerId, VERIFY_MODEL_ROUTE_KEY);
 }
 
-/** Atomically allow at most five Azure voice-list requests per user per minute. */
+/** Atomically allow at most five Azure voice-list requests per user per tenant per minute. */
 export async function consumeAzureVoicesRateLimit(ownerId: string): Promise<void> {
   return consumeUserApiRateLimit(ownerId, AZURE_VOICES_ROUTE_KEY);
 }
 
-/** Atomically allow at most five PDF provider verifications per user per minute. */
+/** Atomically allow at most five PDF provider verifications per user per tenant per minute. */
 export async function consumePdfProviderVerificationRateLimit(ownerId: string): Promise<void> {
   return consumeUserApiRateLimit(ownerId, VERIFY_PDF_ROUTE_KEY);
 }
 
-/** Atomically allow at most five BYOK image provider verifications per user per minute. */
+/** Atomically allow at most five BYOK image provider verifications per user per tenant per minute. */
 export async function consumeImageProviderVerificationRateLimit(ownerId: string): Promise<void> {
   return consumeUserApiRateLimit(ownerId, VERIFY_IMAGE_ROUTE_KEY);
 }
@@ -93,6 +103,12 @@ export async function consumeVideoProviderVerificationRateLimit(ownerId: string)
  * `user:` owner, so the check is always enforced in enterprise mode. `limit`
  * defaults to the shared 5-req/60s action budget; only route keys with a
  * documented higher ceiling (the media proxy) override it.
+ *
+ * The window is keyed `(tenant, user, route)`: the tenant is read from the
+ * request's server-derived attribution, so one user's memberships in two
+ * tenants no longer share a window (a burst in one tenant cannot answer `429`
+ * to the other). Callers outside an attribution scope fall back to the
+ * controlled `default` tenant, reproducing the previous behaviour.
  */
 export async function consumeActionRateLimit(
   ownerId: string,
@@ -105,8 +121,8 @@ export async function consumeActionRateLimit(
 
 /**
  * Fixed-window check for the high-frequency media proxy. Allowed 60 requests
- * per user per 60 seconds so one course's asset burst (~40 downloads) fits with
- * headroom; see PROXY_MEDIA_LIMIT.
+ * per user per tenant per 60 seconds so one course's asset burst (~40 downloads)
+ * fits with headroom; see PROXY_MEDIA_LIMIT.
  */
 export async function consumeProxyMediaRateLimit(ownerId: string): Promise<void> {
   return consumeActionRateLimit(ownerId, 'proxy_media', PROXY_MEDIA_LIMIT);
@@ -124,10 +140,16 @@ async function consumeUserApiRateLimit(
   if (!connectionString) throw new Error('USER_API_RATE_LIMIT_DATABASE_UNAVAILABLE');
   const { pool } = await getServerPersistenceProvider(connectionString);
   const userId = ownerId.slice(USER_OWNER_PREFIX.length);
+  // The tenant comes from the request's server-derived attribution, never from
+  // request input. Without one (legacy deployments, or a caller outside the
+  // owner boundary) the controlled `default` tenant reproduces the previous
+  // single-tenant behaviour, so the counters stay keyed `(tenant, user, route)`.
+  const tenantId = currentUsageAttribution()?.tenantId ?? DEFAULT_RATE_LIMIT_TENANT;
   const result = await pool.query<{ window_started_at: Date | string }>(
-    `INSERT INTO user_api_rate_limits (user_id, route_key, window_started_at, request_count)
-     VALUES ($1, $2, CURRENT_TIMESTAMP, 1)
-     ON CONFLICT (user_id, route_key) DO UPDATE
+    `INSERT INTO user_api_rate_limits
+       (tenant_id, user_id, route_key, window_started_at, request_count)
+     VALUES ($1, $2, $3, CURRENT_TIMESTAMP, 1)
+     ON CONFLICT (tenant_id, user_id, route_key) DO UPDATE
        SET window_started_at = CASE
              WHEN user_api_rate_limits.window_started_at <= CURRENT_TIMESTAMP - INTERVAL '60 seconds'
                THEN CURRENT_TIMESTAMP
@@ -139,9 +161,9 @@ async function consumeUserApiRateLimit(
              ELSE user_api_rate_limits.request_count + 1
            END
        WHERE user_api_rate_limits.window_started_at <= CURRENT_TIMESTAMP - INTERVAL '60 seconds'
-          OR user_api_rate_limits.request_count < $3
+          OR user_api_rate_limits.request_count < $4
      RETURNING window_started_at`,
-    [userId, routeKey, limit],
+    [tenantId, userId, routeKey, limit],
   );
   const windowStartedAt = result.rows[0]?.window_started_at;
   if (windowStartedAt !== undefined) return;
@@ -151,8 +173,8 @@ async function consumeUserApiRateLimit(
   const current = await pool.query<{ retry_after: number }>(
     `SELECT GREATEST(1, CEIL(EXTRACT(EPOCH FROM
        (window_started_at + INTERVAL '60 seconds' - CURRENT_TIMESTAMP)))::integer) AS retry_after
-       FROM user_api_rate_limits WHERE user_id = $1 AND route_key = $2`,
-    [userId, routeKey],
+       FROM user_api_rate_limits WHERE tenant_id = $1 AND user_id = $2 AND route_key = $3`,
+    [tenantId, userId, routeKey],
   );
   throw new UserApiRateLimitExceededError(current.rows[0]?.retry_after ?? PROBE_WINDOW_SECONDS);
 }

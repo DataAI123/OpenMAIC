@@ -411,6 +411,33 @@ allowance.
 - **Not a cross-tenant data-access path.** The counters were never a resource
   read/write surface — the residual was a shared budget, now separated.
 
+#### Rate-limit / burst-allowance tenant boundary (batch 26)
+
+The fixed-window counters (`lib/server/user-api-rate-limit`) were keyed by
+`(user_id, route_key)` alone, the same shape batch 25 closed for quota: one
+user's memberships in two tenants shared a single window, so a burst in tenant A
+answered `429` to tenant B. The window is now keyed `(tenant, user, route)`.
+
+- **Key.** The tenant is read inside the limiter from the request's
+  server-derived `currentUsageAttribution()` — the same ambient value the owner
+  comes from — so all twenty-six route call sites keep passing only `ownerId` and
+  none of them can supply a tenant. It never comes from request input.
+- **Fallback.** With no attribution in scope (legacy deployments, or a caller
+  outside the owner boundary) the limiter uses the controlled `default` tenant,
+  reproducing the previous per-user window byte for byte. The upsert's conflict
+  target and the Retry-After read carry the same tenant predicate.
+- **Migration 0023** adds a `NOT NULL DEFAULT 'default'` `tenant_id`, backfills
+  existing rows into `default`, and re-keys the primary key to
+  `(tenant_id, user_id, route_key)`. Forward-only and idempotent, with the same
+  NOT NULL-over-nullable reasoning as 0022.
+- **Deliberate scope note.** A rate limit is an abuse control, so per-tenant
+  separation means a user in two tenants may draw up to two windows' worth of
+  bursts in a minute. That is accepted deliberately: the counter is shared
+  mutable state on the request path, and letting one tenant's burst throttle
+  another is the cross-tenant interference this series closes. The alternative
+  (keep limiting per person globally) would have left a tenant-visible coupling in
+  place.
+
 #### Process-local state and cache keys: audit conclusion
 
 A sweep of process-local state and cache keys found no tenant-crossing store
