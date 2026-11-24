@@ -17,7 +17,8 @@
 
 import { NextRequest } from 'next/server';
 import { recordGenerationUsage } from '@/lib/server/usage-storage';
-import { generateImage, IMAGE_PROVIDERS } from '@/lib/media/image-providers';
+import { IMAGE_PROVIDERS } from '@/lib/media/constants';
+import { generateImage } from '@/lib/media/image-providers';
 import {
   isServerConfiguredProvider,
   isServerProviderDisabled,

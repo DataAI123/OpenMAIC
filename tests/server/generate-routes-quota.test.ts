@@ -61,13 +61,18 @@ vi.mock('@/lib/server/provider-config', async (importOriginal) => {
   };
 });
 
-vi.mock('@/lib/media/image-providers', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('@/lib/media/image-providers')>();
+vi.mock('@/lib/media/constants', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/lib/media/constants')>();
   const imageProviders = {
     ...actual.IMAGE_PROVIDERS,
     'img-p': { requiresApiKey: true, models: [{ id: 'img-model' }] },
   };
-  return { ...actual, IMAGE_PROVIDERS: imageProviders, generateImage: mocks.generateImage };
+  return { ...actual, IMAGE_PROVIDERS: imageProviders };
+});
+
+vi.mock('@/lib/media/image-providers', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/lib/media/image-providers')>();
+  return { ...actual, generateImage: mocks.generateImage };
 });
 
 vi.mock('@/lib/media/video-providers', async (importOriginal) => {

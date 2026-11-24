@@ -8,14 +8,24 @@ const mocks = vi.hoisted(() => ({
   assertRenderJobOwnedBy: vi.fn(),
   recordRenderJobOwner: vi.fn(),
   checkRenderSubmitLimit: vi.fn(),
+  logError: vi.fn(),
   cappedStream: { stream: new ReadableStream({ start: (c) => c.close() }), exceeded: () => false },
 }));
 
 vi.mock('@/lib/server/agent-runtime/with-owner', () => ({
   withRequestOwnerId: async (
-    _req: NextRequest,
+    req: NextRequest,
     handler: (ownerId: string, headers: Headers) => Promise<Response>,
-  ) => handler(mocks.ownerId, new Headers()),
+  ) =>
+    handler(
+      mocks.ownerId,
+      new Headers({
+        'x-request-id': req.headers.get('x-request-id') ?? 'render-test-request',
+      }),
+    ),
+}));
+vi.mock('@/lib/logger', () => ({
+  createLogger: () => ({ error: mocks.logError, info: vi.fn(), warn: vi.fn(), debug: vi.fn() }),
 }));
 vi.mock('@/lib/server/render-service', () => ({
   resolveRenderServiceUrl: () =>
@@ -105,6 +115,22 @@ describe('DELETE cancel job — ownership gates the relay', () => {
 });
 
 describe('GET download job — ownership gates the content (the leak path)', () => {
+  it('correlates the provider-disabled early response', async () => {
+    mocks.providerConfigured = false;
+    const response = await downloadGet(
+      new NextRequest(url(), {
+        method: 'GET',
+        headers: { 'x-request-id': 'download-provider-disabled' },
+      }),
+      ctx(),
+    );
+
+    expect(response.status).toBe(501);
+    expect(response.headers.get('x-request-id')).toBe('download-provider-disabled');
+    expect(mocks.assertRenderJobOwnedBy).not.toHaveBeenCalled();
+    expect(mocks.proxyFetch).not.toHaveBeenCalled();
+  });
+
   it('answers 404 for an unowned job WITHOUT fetching any bytes', async () => {
     mocks.assertRenderJobOwnedBy.mockResolvedValue(false);
     const response = await downloadGet(new NextRequest(url(), { method: 'GET' }), ctx());
@@ -129,13 +155,16 @@ describe('GET download job — ownership gates the content (the leak path)', () 
 });
 
 describe('POST submit — binds the job to its owner before advertising it', () => {
-  function submitRequest() {
+  function submitRequest(requestId = 'render-submit-test') {
     // Any non-empty body makes `req.body` truthy so the route reaches the
     // streaming relay; the actual multipart bytes are irrelevant (capBodyStream
     // is mocked and the relayed fetch is asserted via proxyFetch).
     return new NextRequest('http://localhost/api/export-video/render', {
       method: 'POST',
-      headers: { 'content-type': 'multipart/form-data' },
+      headers: {
+        'content-type': 'multipart/form-data',
+        'x-request-id': requestId,
+      },
       body: 'export-archive-placeholder',
     });
   }
@@ -167,6 +196,15 @@ describe('POST submit — binds the job to its owner before advertising it', () 
     const cancelCall = mocks.proxyFetch.mock.calls[1];
     expect(cancelCall[0]).toBe('http://render.test/render/job-9');
     expect((cancelCall[1] as RequestInit).method).toBe('DELETE');
+    expect(mocks.logError).toHaveBeenCalledWith(
+      'Failed to bind render job to its owner; cancelling',
+      {
+        requestId: 'render-submit-test',
+        jobId: 'job-9',
+        errorType: 'Error',
+      },
+    );
+    expect(JSON.stringify(mocks.logError.mock.calls)).not.toContain('db unavailable');
   });
 
   it('discards an unbindable job id the service hands back', async () => {
@@ -193,10 +231,33 @@ describe('POST submit — binds the job to its owner before advertising it', () 
 
   it('fails closed (503) without relaying when the concurrency store is unavailable', async () => {
     mocks.checkRenderSubmitLimit.mockRejectedValue(new Error('db unavailable'));
-    const response = await submit(submitRequest());
+    const response = await submit(submitRequest('render-concurrency-failure'));
     expect(response.status).toBe(503);
+    expect(response.headers.get('x-request-id')).toBe('render-concurrency-failure');
     expect(mocks.proxyFetch).not.toHaveBeenCalled();
     expect(mocks.recordRenderJobOwner).not.toHaveBeenCalled();
+    expect(mocks.logError).toHaveBeenCalledWith(
+      'Render submit concurrency check failed; refusing submit',
+      { requestId: 'render-concurrency-failure', errorType: 'Error' },
+    );
+    expect(JSON.stringify(mocks.logError.mock.calls)).not.toContain('db unavailable');
+  });
+
+  it('does not log or return upstream exception text', async () => {
+    mocks.proxyFetch.mockRejectedValue(new Error('private upstream credential detail'));
+    const response = await submit(submitRequest('render-upstream-failure'));
+
+    expect(response.status).toBe(502);
+    expect(response.headers.get('x-request-id')).toBe('render-upstream-failure');
+    const body = await response.text();
+    expect(body).not.toContain('private upstream credential detail');
+    expect(mocks.logError).toHaveBeenCalledWith('Failed to submit render job', {
+      requestId: 'render-upstream-failure',
+      errorType: 'Error',
+    });
+    expect(JSON.stringify(mocks.logError.mock.calls)).not.toContain(
+      'private upstream credential detail',
+    );
   });
 
   it('skips the cap for a legacy anonymous owner and proceeds to submit', async () => {

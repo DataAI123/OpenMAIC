@@ -30,7 +30,7 @@
  * The configured runtime gates the family (the workbench is agent-runtime
  * territory): off, or on without a DATABASE_URL, answers the same plain 404.
  */
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { basename } from 'node:path';
 
 import type { NextRequest } from 'next/server';
@@ -59,6 +59,7 @@ import {
 } from '@/lib/persistence/owner-materials';
 import { getServerPersistenceProvider } from '@/lib/persistence/server-provider';
 import { getMaterialByteStore } from '@/lib/server/materials/bytes';
+import { resolveRequestId, stampRequestId } from '@/lib/server/request-id';
 import {
   isWorkbenchMaterialMime,
   MEDIA_MIME_TYPES,
@@ -103,8 +104,7 @@ function materialFilename(req: NextRequest): string | null {
 }
 
 function materialUploadRequestId(req: NextRequest): string {
-  const upstream = req.headers.get('x-request-id')?.trim();
-  return upstream && /^[A-Za-z0-9._:-]{1,128}$/.test(upstream) ? upstream : randomUUID();
+  return resolveRequestId(req.headers);
 }
 
 function parseLimit(raw: string | null): { limit?: number } | { invalid: true } {
@@ -118,18 +118,28 @@ function parseLimit(raw: string | null): { limit?: number } | { invalid: true } 
 // GET /api/materials?sessionId=&limit=&before= — list one owned session's
 // materials, newest first, keyset-paged (the agent-tools list surface).
 export async function GET(req: NextRequest) {
-  if (!isAgentRuntimeConfigured()) return new Response('Not found', { status: 404 });
+  if (!isAgentRuntimeConfigured()) {
+    return stampRequestId(new Response('Not found', { status: 404 }), req.headers);
+  }
 
   const url = new URL(req.url);
   const sessionId = url.searchParams.get('sessionId')?.trim();
-  if (!sessionId) return apiError('MISSING_REQUIRED_FIELD', 400, 'sessionId is required');
+  if (!sessionId) {
+    return stampRequestId(
+      apiError('MISSING_REQUIRED_FIELD', 400, 'sessionId is required'),
+      req.headers,
+    );
+  }
 
   const parsedLimit = parseLimit(url.searchParams.get('limit'));
   if ('invalid' in parsedLimit) {
-    return apiError(
-      'INVALID_REQUEST',
-      400,
-      `limit must be an integer between 1 and ${MAX_MATERIAL_LIST_LIMIT}`,
+    return stampRequestId(
+      apiError(
+        'INVALID_REQUEST',
+        400,
+        `limit must be an integer between 1 and ${MAX_MATERIAL_LIST_LIMIT}`,
+      ),
+      req.headers,
     );
   }
   const before = url.searchParams.get('before')?.trim() || undefined;
@@ -175,12 +185,16 @@ export async function POST(req: NextRequest) {
   });
   const reject = (response: Response, reason: string, headers: Headers) => {
     console.warn('material upload rejected', context({ status: response.status, reason }));
-    response.headers.set('x-request-id', requestId);
+    // Append the boundary's echo set first, then pin our own id: `set` collapses
+    // any duplicate so the log line and the response agree on one value.
     for (const [key, value] of headers) response.headers.append(key, value);
+    response.headers.set('x-request-id', requestId);
     return response;
   };
 
-  if (!isAgentRuntimeConfigured()) return new Response('Not found', { status: 404 });
+  if (!isAgentRuntimeConfigured()) {
+    return stampRequestId(new Response('Not found', { status: 404 }), req.headers);
+  }
 
   return withRequestOwnerId(req, async (ownerId, responseHeaders, identity) => {
     const tenantId = identity?.tenantId;
@@ -380,8 +394,8 @@ export async function POST(req: NextRequest) {
           },
           { status: 201 },
         );
-        res.headers.set('x-request-id', requestId);
         for (const [key, value] of responseHeaders) res.headers.append(key, value);
+        res.headers.set('x-request-id', requestId);
         console.info('material upload completed', context({ status: 201 }));
         return res;
       } catch (error) {
@@ -409,8 +423,8 @@ export async function POST(req: NextRequest) {
     } catch (error) {
       if (!failureLogged) console.error('material upload failed', context({ status: 500 }), error);
       const res = apiError('INTERNAL_ERROR', 500, 'material upload failed');
-      res.headers.set('x-request-id', requestId);
       for (const [key, value] of responseHeaders) res.headers.append(key, value);
+      res.headers.set('x-request-id', requestId);
       return res;
     }
   });

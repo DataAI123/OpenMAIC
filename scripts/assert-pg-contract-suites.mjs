@@ -63,14 +63,15 @@ const REQUIRED_SUITES = [
   'packages/@openmaic/storage/test/pg-runtime-store.pg.test.ts',
   'packages/@openmaic/storage/test/pg-scene-revision.pg.test.ts',
   'packages/@openmaic/storage/test/pg-asset-store.pg.test.ts',
+  'packages/@openmaic/storage/test/pg-agent-session-store.pg.test.ts',
 ];
 
 /**
- * The tables created by `DOCUMENT_PG_SCHEMA`, `RUNTIME_PG_SCHEMA` and
- * `ASSET_PG_SCHEMA`. Kept explicit rather than parsed out of those sources:
- * this list is the independent statement of what the contract must have
- * touched, and deriving it from the code under test would let that code narrow
- * its own audit.
+ * The tables created by the document, runtime, asset and agent-session PG
+ * schemas. Kept explicit rather than parsed out of those sources: this list is
+ * the independent statement of what the contract must have touched, and
+ * deriving it from the code under test would let that code narrow its own
+ * audit.
  *
  * `document_asset_refs` is the one table two backends meet on -- the asset
  * schema owns it, the document store writes it -- so an insert into it during
@@ -79,6 +80,10 @@ const REQUIRED_SUITES = [
  * the collector refuses to run its entry pass without, so requiring an insert
  * keeps the suite that exercises that refusal honest: a run where the tracking
  * document store never wrote would satisfy nothing here.
+ *
+ * All six `agent_*` tables are owned by `AGENT_SESSION_PG_SCHEMA`; requiring
+ * inserts in each keeps its real-PG suite from silently losing entry-tree,
+ * URL, event-log, or owner-projection coverage.
  */
 const REQUIRED_TABLES = [
   'document_stages',
@@ -93,6 +98,12 @@ const REQUIRED_TABLES = [
   'document_asset_refs',
   'asset_reference_tracking',
   'document_asset_withdrawals',
+  'agent_sessions',
+  'agent_session_events',
+  'agent_session_entries',
+  'agent_session_urls',
+  'agent_owner_session_events',
+  'agent_owner_session_event_counters',
 ];
 
 const usage = [

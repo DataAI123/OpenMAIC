@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import type { VideoProviderId } from '@/lib/media/types';
-import { VIDEO_PROVIDERS, generateVideo, testVideoConnectivity } from '@/lib/media/video-providers';
+import { VIDEO_PROVIDERS } from '@/lib/media/constants';
+import { generateVideo, testVideoConnectivity } from '@/lib/media/video-providers';
 
 const adapterMocks = vi.hoisted(() => {
   const connectivity = () => ({ success: true, message: 'ok' });

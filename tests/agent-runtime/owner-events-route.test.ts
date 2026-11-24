@@ -5,24 +5,22 @@ const mocks = vi.hoisted(() => ({
   readOwnerRetirement: vi.fn(),
   readOwnerSessionEventMaxId: vi.fn(),
   readOwnerSessionEventsAfter: vi.fn(),
+  getAgentSessionStore: vi.fn(),
   resolveRequestOwnerId: vi.fn(),
   wake: undefined as undefined | (() => void),
   unsubscribeWakeup: vi.fn(),
+  runtimeConfigured: true,
 }));
 
 vi.mock('@/lib/config/feature-flags', () => ({
   isAgentRuntimeEnabled: () => true,
-  isAgentRuntimeConfigured: () => true,
+  isAgentRuntimeConfigured: () => mocks.runtimeConfigured,
 }));
 vi.mock('@/lib/server/agent-runtime/owner', () => ({
   resolveRequestOwnerId: mocks.resolveRequestOwnerId,
 }));
 vi.mock('@/lib/server/agent-runtime/store', () => ({
-  getAgentSessionStore: vi.fn(async () => ({
-    readRetirement: mocks.readOwnerRetirement,
-    readMaxId: mocks.readOwnerSessionEventMaxId,
-    readAfter: mocks.readOwnerSessionEventsAfter,
-  })),
+  getAgentSessionStore: mocks.getAgentSessionStore,
 }));
 vi.mock('@/lib/server/agent-runtime/event-notify-bus', () => ({
   subscribeAgentEventWakeup: vi.fn((_route, wake: () => void) => {
@@ -64,10 +62,16 @@ beforeEach(() => {
   vi.useFakeTimers();
   vi.clearAllMocks();
   mocks.wake = undefined;
+  mocks.runtimeConfigured = true;
   mocks.resolveRequestOwnerId.mockReturnValue('user:mine');
   mocks.readOwnerRetirement.mockResolvedValue(null);
   mocks.readOwnerSessionEventMaxId.mockResolvedValue(BigInt(0));
   mocks.readOwnerSessionEventsAfter.mockResolvedValue([]);
+  mocks.getAgentSessionStore.mockResolvedValue({
+    readRetirement: mocks.readOwnerRetirement,
+    readMaxId: mocks.readOwnerSessionEventMaxId,
+    readAfter: mocks.readOwnerSessionEventsAfter,
+  });
 });
 
 afterEach(() => {
@@ -75,6 +79,43 @@ afterEach(() => {
 });
 
 describe('GET owner session events', () => {
+  it('correlates the runtime-disabled early 404', async () => {
+    mocks.runtimeConfigured = false;
+    const response = await GET(
+      new NextRequest('http://localhost/api/agent/owner-events', {
+        headers: { 'x-request-id': 'owner-events-disabled' },
+      }),
+    );
+
+    expect(response.status).toBe(404);
+    expect(response.headers.get('x-request-id')).toBe('owner-events-disabled');
+    expect(mocks.resolveRequestOwnerId).not.toHaveBeenCalled();
+  });
+
+  it('returns a correlated service-unavailable response if store initialization fails', async () => {
+    mocks.getAgentSessionStore.mockRejectedValueOnce(new Error('database password leaked'));
+    const errorLog = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    const response = await GET(
+      new NextRequest('http://localhost/api/agent/owner-events', {
+        headers: { 'x-request-id': 'owner-events-store-failed' },
+      }),
+    );
+
+    expect(response.status).toBe(503);
+    expect(response.headers.get('x-request-id')).toBe('owner-events-store-failed');
+    await expect(response.json()).resolves.toEqual({
+      success: false,
+      errorCode: 'UPSTREAM_ERROR',
+      error: 'Agent event stream is unavailable',
+    });
+    expect(errorLog).toHaveBeenCalledWith(
+      '[agent-runtime] failed to prepare owner event stream (requestId=owner-events-store-failed)',
+      'Error',
+    );
+    errorLog.mockRestore();
+  });
+
   it('preserves an anonymous owner cookie on the SSE response', async () => {
     mocks.resolveRequestOwnerId.mockImplementationOnce((_request, responseHeaders: Headers) => {
       responseHeaders.set('Set-Cookie', 'anonymous_id=test; Path=/; HttpOnly');
@@ -322,6 +363,42 @@ describe('GET owner session events', () => {
     expect(mocks.readOwnerSessionEventsAfter).toHaveBeenCalledTimes(2);
     await reader.cancel();
     expect(mocks.unsubscribeWakeup).toHaveBeenCalledOnce();
+  });
+
+  it('cancels an in-flight poll without rescheduling or retaining stream resources', async () => {
+    const response = await call();
+    const reader = response.body!.getReader();
+    await readChunk(reader);
+
+    let releasePoll!: () => void;
+    mocks.readOwnerSessionEventsAfter.mockImplementationOnce(async () => {
+      await new Promise<void>((resolve) => {
+        releasePoll = resolve;
+      });
+      return [
+        {
+          id: '1',
+          ownerId: 'user:mine',
+          sessionId: 'session-live',
+          ts: 123,
+          type: 'session_status',
+          status: 'running',
+          attempt: 1,
+        },
+      ];
+    });
+    await vi.advanceTimersByTimeAsync(OWNER_EVENT_POLL_INTERVAL_MS);
+    expect(mocks.readOwnerSessionEventsAfter).toHaveBeenCalledTimes(2);
+
+    await reader.cancel();
+    expect(vi.getTimerCount()).toBe(0);
+    expect(mocks.unsubscribeWakeup).toHaveBeenCalledOnce();
+    releasePoll();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(mocks.readOwnerSessionEventsAfter).toHaveBeenCalledTimes(2);
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it('converges within the 30s polling interval', async () => {

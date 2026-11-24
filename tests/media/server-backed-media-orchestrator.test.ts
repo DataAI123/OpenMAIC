@@ -1377,6 +1377,7 @@ describe('server-backed classic media orchestrator', () => {
     // Give the second pass every chance to run: if it were not waiting, its
     // collection loop is synchronous and element two is only `pending`, so it
     // would have called the provider by now.
+    await vi.waitFor(() => expect(overlapping).toBeDefined());
     for (let tick = 0; tick < 50; tick += 1) await Promise.resolve();
     expect(providerCallCount()).toBe(callsWhenOverlappingStarted);
 
@@ -1402,7 +1403,10 @@ describe('server-backed classic media orchestrator', () => {
     );
 
     let allocated = 0;
-    mocks.putAsset.mockImplementation(async () => `ast_${(allocated += 1)}`);
+    mocks.putAsset.mockImplementation(async () => {
+      allocated += 1;
+      return `ast_${allocated}`;
+    });
     let releaseFirst: (() => void) | undefined;
     const firstInFlight = new Promise<void>((resolve) => {
       releaseFirst = resolve;
@@ -1429,8 +1433,7 @@ describe('server-backed classic media orchestrator', () => {
 
     const first = new AbortController();
     const pass1 = generateMediaForOutlines(outlines, stageId, first.signal).catch(() => undefined);
-    await Promise.resolve();
-    await Promise.resolve();
+    await vi.waitFor(() => expect(calls).toBe(1));
 
     // Verbatim what the retry path does, in one synchronous block.
     first.abort();

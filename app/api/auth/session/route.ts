@@ -2,10 +2,11 @@ import { NextRequest, NextResponse } from 'next/server';
 
 import { resolveAuthConfig } from '@/lib/server/auth/config';
 import { clearedSessionCookieHeader, resolveApplicationSession } from '@/lib/server/auth/session';
+import { stampRequestId } from '@/lib/server/request-id';
 
 export const runtime = 'nodejs';
 
-export async function GET(request: NextRequest): Promise<NextResponse> {
+async function handleGet(request: NextRequest): Promise<NextResponse> {
   let config;
   try {
     config = resolveAuthConfig();
@@ -62,4 +63,19 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     },
     { headers: { 'Cache-Control': 'no-store' } },
   );
+}
+
+export async function GET(request: NextRequest): Promise<NextResponse> {
+  try {
+    return stampRequestId(await handleGet(request), request.headers);
+  } catch (error) {
+    console.error('[auth] session route failed', error instanceof Error ? error.name : 'unknown');
+    return stampRequestId(
+      NextResponse.json(
+        { mode: 'unavailable', status: 'unavailable' },
+        { status: 503, headers: { 'Cache-Control': 'no-store' } },
+      ),
+      request.headers,
+    );
+  }
 }

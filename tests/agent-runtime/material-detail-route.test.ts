@@ -48,8 +48,10 @@ function material(overrides: Partial<AgentSessionMaterial> = {}): AgentSessionMa
   };
 }
 
-function call(id = MATERIAL_ID) {
-  const req = new NextRequest(`http://localhost/api/materials/${id}?sessionId=${SESSION_ID}`);
+function call(id = MATERIAL_ID, requestId?: string) {
+  const req = new NextRequest(`http://localhost/api/materials/${id}?sessionId=${SESSION_ID}`, {
+    headers: requestId ? { 'x-request-id': requestId } : undefined,
+  });
   return GET(req, { params: Promise.resolve({ id }) });
 }
 
@@ -80,9 +82,12 @@ describe('GET /api/materials/[id]', () => {
   });
 
   it('rejects a missing sessionId', async () => {
-    const req = new NextRequest(`http://localhost/api/materials/${MATERIAL_ID}`);
+    const req = new NextRequest(`http://localhost/api/materials/${MATERIAL_ID}`, {
+      headers: { 'x-request-id': 'material-detail-missing-session' },
+    });
     const response = await GET(req, { params: Promise.resolve({ id: MATERIAL_ID }) });
     expect(response.status).toBe(400);
+    expect(response.headers.get('x-request-id')).toBe('material-detail-missing-session');
     expect(mocks.getSessionMaterial).not.toHaveBeenCalled();
   });
 
@@ -113,6 +118,8 @@ describe('GET /api/materials/[id]', () => {
 
   it('answers 404 when the agent runtime is not configured', async () => {
     mocks.runtimeConfigured = false;
-    expect((await call()).status).toBe(404);
+    const response = await call(MATERIAL_ID, 'material-detail-runtime-disabled');
+    expect(response.status).toBe(404);
+    expect(response.headers.get('x-request-id')).toBe('material-detail-runtime-disabled');
   });
 });

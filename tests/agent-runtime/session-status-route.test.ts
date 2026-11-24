@@ -45,9 +45,13 @@ describe('GET agent session status map', () => {
   it('stays behind the runtime feature gate', async () => {
     mocks.runtimeEnabled = false;
 
-    expect((await GET(new NextRequest('http://localhost/api/agent/sessions/status'))).status).toBe(
-      404,
+    const response = await GET(
+      new NextRequest('http://localhost/api/agent/sessions/status', {
+        headers: { 'x-request-id': 'session-status-off' },
+      }),
     );
+    expect(response.status).toBe(404);
+    expect(response.headers.get('x-request-id')).toBe('session-status-off');
     expect(mocks.listSessionsByOwner).not.toHaveBeenCalled();
   });
 });

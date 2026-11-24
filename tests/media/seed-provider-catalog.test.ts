@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { IMAGE_PROVIDERS } from '@/lib/media/image-providers';
-import { VIDEO_PROVIDERS } from '@/lib/media/video-providers';
+import { IMAGE_PROVIDERS, VIDEO_PROVIDERS } from '@/lib/media/constants';
 
 describe('Seed media provider catalog', () => {
   it('includes the official Seedream 5.0 Lite model aliases', () => {

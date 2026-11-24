@@ -39,6 +39,7 @@ import { isAgentRuntimeConfigured } from '@/lib/config/feature-flags';
 import { subscribeAgentEventWakeup } from '@/lib/server/agent-runtime/event-notify-bus';
 import { resolveRequestOwnerIdForRequest } from '@/lib/server/agent-runtime/with-owner';
 import { getAgentSessionStore } from '@/lib/server/agent-runtime/store';
+import { REQUEST_ID_HEADER, stampRequestId } from '@/lib/server/request-id';
 
 export const runtime = 'nodejs';
 // Self-hosted `next start` does not enforce maxDuration; it remains useful to
@@ -61,7 +62,7 @@ const BACKLOG_PAGE = 500;
 
 export async function GET(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   if (!isAgentRuntimeConfigured()) {
-    return new Response('Not found', { status: 404 });
+    return stampRequestId(new Response('Not found', { status: 404 }), req.headers);
   }
   const { id } = await params;
   const ownerResolution = await resolveRequestOwnerIdForRequest(req);
@@ -72,13 +73,22 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
   // the same 404 body and status, so the response cannot be used to probe
   // whether a session UUID exists. Legacy requests may receive a newly minted
   // anonymous cookie; OIDC requests use the verified application session.
-  const store = await getAgentSessionStore(tenantId);
-  const meta = await store.getSession(id);
-  if (!meta) {
-    return new Response('Not found', { status: 404, headers: responseHeaders });
-  }
-  if (meta.ownerId !== ownerId) {
-    return new Response('Not found', { status: 404, headers: responseHeaders });
+  let store: Awaited<ReturnType<typeof getAgentSessionStore>>;
+  try {
+    store = await getAgentSessionStore(tenantId);
+    const meta = await store.getSession(id);
+    if (!meta || meta.ownerId !== ownerId) {
+      return new Response('Not found', { status: 404, headers: responseHeaders });
+    }
+  } catch (error) {
+    console.error(
+      `[agent-runtime] failed to prepare session event stream (requestId=${responseHeaders.get(REQUEST_ID_HEADER)})`,
+      error instanceof Error ? error.name : 'unknown',
+    );
+    return Response.json(
+      { success: false, errorCode: 'UPSTREAM_ERROR', error: 'Agent event stream is unavailable' },
+      { status: 503, headers: responseHeaders },
+    );
   }
 
   const url = new URL(req.url);

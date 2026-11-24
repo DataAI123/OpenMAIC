@@ -50,7 +50,9 @@ export interface RenderServiceCapability {
  * throwing) when unconfigured or unreachable, so the capability endpoint can
  * report a truthful enabled/disabled state and the UI degrades cleanly.
  */
-export async function getRenderServiceCapability(): Promise<RenderServiceCapability> {
+export async function getRenderServiceCapability(
+  requestId: string,
+): Promise<RenderServiceCapability> {
   const url = getRenderServiceUrl();
   if (!url) return { enabled: false };
   try {
@@ -67,7 +69,10 @@ export async function getRenderServiceCapability(): Promise<RenderServiceCapabil
       ...(typeof body?.accepting === 'boolean' ? { accepting: body.accepting } : {}),
     };
   } catch (error) {
-    log.info('Render service health check failed:', error instanceof Error ? error.message : error);
+    log.info('Render service health check failed', {
+      requestId,
+      errorName: error instanceof Error ? error.name : 'unknown',
+    });
     return { enabled: false };
   }
 }

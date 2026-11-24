@@ -23,6 +23,7 @@ import { DocumentNotFoundError, DocumentVersionError, type MaicDocument } from '
 
 import { isAgentRuntimeConfigured } from '@/lib/config/feature-flags';
 import { apiError } from '@/lib/server/api-response';
+import { stampRequestId } from '@/lib/server/request-id';
 import { getOwnerScopedDocumentStore } from '@/lib/server/agent-runtime/owner-scoped-documents';
 import { ownerApiError, ownerJson, ownerNotFound } from '@/lib/server/agent-runtime/route-response';
 import { withRequestOwnerId } from '@/lib/server/agent-runtime/with-owner';
@@ -63,7 +64,9 @@ function mapSaveError(error: unknown, headers: Headers) {
 
 // GET /api/stages/[id] — the full document.
 export async function GET(req: NextRequest, { params }: Params) {
-  if (!isAgentRuntimeConfigured()) return new Response('Not found', { status: 404 });
+  if (!isAgentRuntimeConfigured()) {
+    return stampRequestId(new Response('Not found', { status: 404 }), req.headers);
+  }
 
   return withRequestOwnerId(
     req,
@@ -80,24 +83,28 @@ export async function GET(req: NextRequest, { params }: Params) {
 
 // PATCH /api/stages/[id] — rename the course (owner-only).
 export async function PATCH(req: NextRequest, { params }: Params) {
-  if (!isAgentRuntimeConfigured()) return new Response('Not found', { status: 404 });
+  if (!isAgentRuntimeConfigured()) {
+    return stampRequestId(new Response('Not found', { status: 404 }), req.headers);
+  }
 
   let body: unknown;
   try {
     body = await req.json();
   } catch {
-    return apiError('INVALID_REQUEST', 400, 'invalid JSON body');
+    return stampRequestId(apiError('INVALID_REQUEST', 400, 'invalid JSON body'), req.headers);
   }
   const rawName = (body as { name?: unknown })?.name;
   if (typeof rawName !== 'string' || rawName.trim().length === 0) {
-    return apiError('INVALID_REQUEST', 400, 'name must be a non-empty string');
+    return stampRequestId(
+      apiError('INVALID_REQUEST', 400, 'name must be a non-empty string'),
+      req.headers,
+    );
   }
   const name = rawName.trim();
   if (name.length > STAGE_NAME_MAX_LENGTH) {
-    return apiError(
-      'INVALID_REQUEST',
-      400,
-      `name exceeds the ${STAGE_NAME_MAX_LENGTH} character limit`,
+    return stampRequestId(
+      apiError('INVALID_REQUEST', 400, `name exceeds the ${STAGE_NAME_MAX_LENGTH} character limit`),
+      req.headers,
     );
   }
 
@@ -120,13 +127,15 @@ export async function PATCH(req: NextRequest, { params }: Params) {
 
 // PUT /api/stages/[id] — save a whole document.
 export async function PUT(req: NextRequest, { params }: Params) {
-  if (!isAgentRuntimeConfigured()) return new Response('Not found', { status: 404 });
+  if (!isAgentRuntimeConfigured()) {
+    return stampRequestId(new Response('Not found', { status: 404 }), req.headers);
+  }
 
   let body: unknown;
   try {
     body = await req.json();
   } catch {
-    return apiError('INVALID_REQUEST', 400, 'invalid JSON body');
+    return stampRequestId(apiError('INVALID_REQUEST', 400, 'invalid JSON body'), req.headers);
   }
   const candidate = body as {
     stage?: { id?: unknown; updatedAt?: unknown };
@@ -140,10 +149,13 @@ export async function PUT(req: NextRequest, { params }: Params) {
     typeof candidate.stage.id !== 'string' ||
     !Array.isArray(candidate.scenes)
   ) {
-    return apiError(
-      'INVALID_REQUEST',
-      400,
-      'request body must be a stage document with `stage` and `scenes`',
+    return stampRequestId(
+      apiError(
+        'INVALID_REQUEST',
+        400,
+        'request body must be a stage document with `stage` and `scenes`',
+      ),
+      req.headers,
     );
   }
 
@@ -182,7 +194,9 @@ export async function PUT(req: NextRequest, { params }: Params) {
 
 // DELETE /api/stages/[id] — remove the course and its scenes/outline.
 export async function DELETE(req: NextRequest, { params }: Params) {
-  if (!isAgentRuntimeConfigured()) return new Response('Not found', { status: 404 });
+  if (!isAgentRuntimeConfigured()) {
+    return stampRequestId(new Response('Not found', { status: 404 }), req.headers);
+  }
 
   return withRequestOwnerId(req, async (ownerId, responseHeaders, identity) => {
     const { id } = await params;

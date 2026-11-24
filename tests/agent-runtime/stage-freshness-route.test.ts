@@ -24,8 +24,8 @@ import { GET, STAGE_FRESHNESS_POLL_INTERVAL_MS } from '@/app/api/stages/[id]/fre
 
 const STAGE_ID = 'stage-1';
 
-function call(id = STAGE_ID) {
-  const req = new NextRequest(`http://localhost/api/stages/${id}/freshness`);
+function call(id = STAGE_ID, headers?: HeadersInit) {
+  const req = new NextRequest(`http://localhost/api/stages/${id}/freshness`, { headers });
   return GET(req, { params: Promise.resolve({ id }) });
 }
 
@@ -70,6 +70,7 @@ describe('GET /api/stages/[id]/freshness', () => {
     const reader = response.body!.getReader();
 
     expect(response.headers.get('content-type')).toContain('text/event-stream');
+    expect(response.headers.get('x-request-id')).toMatch(/^[A-Za-z0-9._:-]{1,128}$/);
     const received = await readUntilFreshness(reader);
     expect(received).toContain('retry: 3000');
     expect(received).toContain(
@@ -134,6 +135,45 @@ describe('GET /api/stages/[id]/freshness', () => {
 
   it('answers 404 when the agent runtime is not configured', async () => {
     mocks.runtimeConfigured = false;
-    expect((await call()).status).toBe(404);
+    const response = await call(STAGE_ID, { 'x-request-id': 'freshness:disabled' });
+
+    expect(response.status).toBe(404);
+    expect(response.headers.get('x-request-id')).toBe('freshness:disabled');
+  });
+
+  it('returns an identified, redacted 503 when initial store access fails', async () => {
+    mocks.fakeStore!.store.readFreshnessManifest = vi
+      .fn()
+      .mockRejectedValue(new Error('password=private-secret'));
+    const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const response = await call(STAGE_ID, { 'x-request-id': 'freshness:store-failure' });
+
+    expect(response.status).toBe(503);
+    expect(response.headers.get('x-request-id')).toBe('freshness:store-failure');
+    expect(await response.text()).not.toContain('private-secret');
+    expect(errorLog).toHaveBeenCalledWith(
+      '[agent-runtime] failed to prepare stage freshness stream (requestId=freshness:store-failure)',
+      'Error',
+    );
+    errorLog.mockRestore();
+  });
+
+  it('returns an identified, redacted 503 when owner resolution throws', async () => {
+    mocks.resolveRequestOwnerId.mockImplementationOnce(() => {
+      throw new Error('secret owner resolver detail');
+    });
+    const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const response = await call(STAGE_ID, { 'x-request-id': 'freshness:owner-failure' });
+
+    expect(response.status).toBe(503);
+    expect(response.headers.get('x-request-id')).toBe('freshness:owner-failure');
+    expect(await response.text()).not.toContain('secret owner resolver detail');
+    expect(errorLog).toHaveBeenCalledWith(
+      '[agent-runtime] failed to resolve stage freshness owner (requestId=freshness:owner-failure)',
+      'Error',
+    );
+    errorLog.mockRestore();
   });
 });

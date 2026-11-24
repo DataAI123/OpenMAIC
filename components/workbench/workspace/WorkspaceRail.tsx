@@ -153,7 +153,12 @@ import {
 import { useTreeDrag, type DragKind } from './use-tree-drag';
 import { PaneFoldButton } from './PaneFoldButton';
 import { deleteWorkspaceSession } from '@/lib/workbench/workspace-actions';
-import { isLoginRequiredError, redirectToLogin } from '@/lib/auth/client-login';
+import {
+  isLoginRequiredError,
+  isTenantRequiredError,
+  redirectToLogin,
+  refreshTenantSelection,
+} from '@/lib/auth/client-login';
 import { apiRenameStage, StageRenameError, STAGE_NAME_MAX_LENGTH } from '@/lib/live/server-api';
 import { SESSION_TITLE_MAX_LENGTH, workbenchSessionTitle } from '@/lib/workbench/session-title';
 import {
@@ -461,6 +466,10 @@ export function WorkspaceRail({
       } catch (cause: unknown) {
         if (isLoginRequiredError(cause)) {
           redirectToLogin();
+          return;
+        }
+        if (isTenantRequiredError(cause)) {
+          refreshTenantSelection();
           return;
         }
         setDeletedSessionIds((current) => {

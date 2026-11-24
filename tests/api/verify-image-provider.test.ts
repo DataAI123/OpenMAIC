@@ -214,13 +214,31 @@ describe('POST /api/verify-image-provider OIDC slice', () => {
     expect(upstreamFetch).not.toHaveBeenCalled();
   });
 
-  it('retains the legacy provider path outside OIDC mode', async () => {
+  it('retains the legacy provider path and correlates its response outside OIDC mode', async () => {
     mocks.resolveAuthConfig.mockReturnValue({ mode: 'legacy' });
 
-    const response = await post({ 'x-image-provider': 'openrouter-image' });
+    const response = await post({
+      'x-image-provider': 'openrouter-image',
+      'x-request-id': 'image-legacy-probe',
+    });
 
     expect(response.status).toBe(200);
+    expect(response.headers.get('x-request-id')).toBe('image-legacy-probe');
     expect(mocks.legacyConnectivity).toHaveBeenCalledOnce();
     expect(mocks.consumeImageProviderVerificationRateLimit).not.toHaveBeenCalled();
+  });
+
+  it('returns a correlated sanitized error when auth configuration is unavailable', async () => {
+    mocks.resolveAuthConfig.mockImplementation(() => {
+      throw new Error('private configuration details');
+    });
+
+    const response = await post({ 'x-request-id': 'image-auth-config-failure' });
+
+    expect(response.status).toBe(503);
+    expect(response.headers.get('x-request-id')).toBe('image-auth-config-failure');
+    const body = await response.text();
+    expect(body).toContain('INTERNAL_ERROR');
+    expect(body).not.toContain('private configuration details');
   });
 });

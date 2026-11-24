@@ -10,7 +10,13 @@ vi.mock('next/headers', () => ({
 
 const ACCESS_CODE = 'a'.repeat(32);
 
-type StatusGet = () => Promise<Response>;
+type StatusGet = (request: Request) => Promise<Response>;
+
+function statusRequest(requestId: string) {
+  return new Request('https://openmaic.example.com/api/access-code/status', {
+    headers: { 'x-request-id': requestId },
+  });
+}
 
 /** Re-import the route so each test sees the current environment. */
 async function loadGet(): Promise<StatusGet> {
@@ -32,6 +38,7 @@ const OIDC_ENV = {
 
 describe('GET /api/access-code/status', () => {
   afterEach(() => {
+    vi.restoreAllMocks();
     vi.unstubAllEnvs();
     mocks.cookieGet.mockReset();
     delete process.env.ACCESS_CODE;
@@ -42,7 +49,7 @@ describe('GET /api/access-code/status', () => {
     process.env.ACCESS_CODE = ACCESS_CODE;
     const GET = await loadGet();
 
-    const response = await GET();
+    const response = await GET(statusRequest('access-code-status:oidc'));
 
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toMatchObject({
@@ -51,6 +58,7 @@ describe('GET /api/access-code/status', () => {
       authenticated: false,
     });
     expect(response.headers.get('Cache-Control')).toBe('private, no-store');
+    expect(response.headers.get('x-request-id')).toBe('access-code-status:oidc');
     expect(mocks.cookieGet).not.toHaveBeenCalled();
   });
 
@@ -59,35 +67,55 @@ describe('GET /api/access-code/status', () => {
     process.env.ACCESS_CODE = ACCESS_CODE;
     const GET = await loadGet();
 
-    const response = await GET();
+    const response = await GET(statusRequest('access-code-status:config'));
 
     await expect(response.json()).resolves.toMatchObject({ enabled: false, authenticated: false });
+    expect(response.headers.get('x-request-id')).toBe('access-code-status:config');
   });
 
   it('preserves the legacy access-code status when the mode is legacy', async () => {
     process.env.ACCESS_CODE = ACCESS_CODE;
     const GET = await loadGet();
 
-    const anonymous = await GET();
+    const anonymous = await GET(statusRequest('access-code-status:guest'));
     await expect(anonymous.json()).resolves.toMatchObject({ enabled: true, authenticated: false });
     expect(anonymous.headers.get('Cache-Control')).toBeNull();
+    expect(anonymous.headers.get('x-request-id')).toBe('access-code-status:guest');
     expect(mocks.cookieGet).toHaveBeenCalled();
 
     const { createAccessToken } = await import('@/lib/server/access-token');
     mocks.cookieGet.mockReturnValue({ value: createAccessToken(ACCESS_CODE) });
 
-    const authenticated = await GET();
+    const authenticated = await GET(statusRequest('access-code-status:authed'));
     await expect(authenticated.json()).resolves.toMatchObject({
       enabled: true,
       authenticated: true,
     });
+    expect(authenticated.headers.get('x-request-id')).toBe('access-code-status:authed');
   });
 
   it('reports the channel disabled when no access code is configured', async () => {
     const GET = await loadGet();
 
-    const response = await GET();
+    const response = await GET(statusRequest('access-code-status:disabled'));
 
     await expect(response.json()).resolves.toMatchObject({ enabled: false, authenticated: false });
+    expect(response.headers.get('x-request-id')).toBe('access-code-status:disabled');
+  });
+
+  it('correlates unexpected cookie-store failures without returning their details', async () => {
+    process.env.ACCESS_CODE = ACCESS_CODE;
+    mocks.cookieGet.mockImplementation(() => {
+      throw new Error('private cookie-store detail');
+    });
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const GET = await loadGet();
+
+    const response = await GET(statusRequest('access-code-status:error'));
+
+    expect(response.status).toBe(503);
+    expect(response.headers.get('x-request-id')).toBe('access-code-status:error');
+    expect(await response.text()).not.toContain('private cookie-store detail');
+    expect(error).toHaveBeenCalled();
   });
 });

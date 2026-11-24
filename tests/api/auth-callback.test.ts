@@ -43,8 +43,8 @@ const config = {
   defaultTenant: 'default',
 };
 
-function callback(url: string) {
-  return new NextRequest(url);
+function callback(url: string, headers?: HeadersInit) {
+  return new NextRequest(url, headers ? { headers } : undefined);
 }
 
 describe('GET /api/auth/callback parameter validation', () => {
@@ -71,11 +71,13 @@ describe('GET /api/auth/callback parameter validation', () => {
     const response = await GET(
       callback(
         'https://openmaic.example.com/api/auth/callback?state=state-value&state=attacker-state&code=code',
+        { 'x-request-id': 'auth-callback:rejected' },
       ),
     );
 
     expect(response.status).toBe(400);
     expect(await response.json()).toMatchObject({ errorCode: 'INVALID_AUTH_RESPONSE' });
+    expect(response.headers.get('x-request-id')).toBe('auth-callback:rejected');
     expect(mocks.readFlowCookie).not.toHaveBeenCalled();
     expect(mocks.authorizationCodeGrant).not.toHaveBeenCalled();
   });
@@ -140,10 +142,14 @@ describe('GET /api/auth/callback parameter validation', () => {
     });
     const { GET } = await import('@/app/api/auth/callback/route');
     const response = await GET(
-      callback('https://openmaic.example.com/api/auth/callback?state=state-value&code=single-code'),
+      callback(
+        'https://openmaic.example.com/api/auth/callback?state=state-value&code=single-code',
+        { 'x-request-id': 'auth-callback:success' },
+      ),
     );
 
     expect(response.status).toBe(303);
+    expect(response.headers.get('x-request-id')).toBe('auth-callback:success');
     expect(response.headers.get('location')).toBe('https://openmaic.example.com/workspace');
     const [client, callbackUri, checks] = mocks.authorizationCodeGrant.mock.calls[0]!;
     expect(client).toEqual({});

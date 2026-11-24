@@ -60,6 +60,7 @@ export async function POST(req: NextRequest) {
   }
 
   return withRequestOwnerId(req, async (ownerId, responseHeaders, identity) => {
+    const requestId = responseHeaders.get('x-request-id');
     const contentType = req.headers.get('content-type') ?? '';
     if (!contentType.includes('multipart/form-data') || !req.body) {
       return attachOwnerHeaders(
@@ -81,7 +82,10 @@ export async function POST(req: NextRequest) {
       try {
         limit = await checkRenderSubmitLimit(ownerId, identity?.tenantId);
       } catch (error) {
-        log.error('Render submit concurrency check failed; refusing submit:', error);
+        log.error('Render submit concurrency check failed; refusing submit', {
+          requestId,
+          errorType: error instanceof Error ? error.name : 'unknown',
+        });
         return attachOwnerHeaders(
           apiError('UPSTREAM_ERROR', 503, 'Render job concurrency check is unavailable'),
           responseHeaders,
@@ -137,7 +141,7 @@ export async function POST(req: NextRequest) {
       if (!isSafeRenderJobId(jobId)) {
         // The service handed back a job id we cannot bind; refuse rather than
         // advertise an unattributable job, and try to reclaim it upstream.
-        log.error('Render service returned an unusable job id; discarding job');
+        log.error('Render service returned an unusable job id; discarding job', { requestId });
         await cancelUpstreamJob(resolved.url, String(jobId ?? ''));
         return attachOwnerHeaders(
           apiError('UPSTREAM_ERROR', 502, 'Render service returned an invalid job id'),
@@ -150,7 +154,11 @@ export async function POST(req: NextRequest) {
       } catch (error) {
         // Ownership binding is mandatory and fail-closed: a job the app cannot
         // attribute must not be handed to the client. Best-effort cancel it.
-        log.error(`Failed to bind render job ${jobId} to its owner; cancelling:`, error);
+        log.error('Failed to bind render job to its owner; cancelling', {
+          requestId,
+          jobId,
+          errorType: error instanceof Error ? error.name : 'unknown',
+        });
         await cancelUpstreamJob(resolved.url, jobId);
         return attachOwnerHeaders(
           apiError('UPSTREAM_ERROR', 503, 'Render job could not be registered'),
@@ -167,14 +175,12 @@ export async function POST(req: NextRequest) {
           responseHeaders,
         );
       }
-      log.error('Failed to submit render job:', error);
+      log.error('Failed to submit render job', {
+        requestId,
+        errorType: error instanceof Error ? error.name : 'unknown',
+      });
       return attachOwnerHeaders(
-        apiError(
-          'UPSTREAM_ERROR',
-          502,
-          'Failed to reach render service',
-          error instanceof Error ? error.message : String(error),
-        ),
+        apiError('UPSTREAM_ERROR', 502, 'Failed to reach render service'),
         responseHeaders,
       );
     }

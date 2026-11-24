@@ -25,6 +25,7 @@ export interface GenerationSessionState {
   pdfFileName?: string;
   documentMimeType?: string;
   pdfProviderId?: string;
+  // Legacy persisted sessions may contain this field; sanitize it before use or persistence.
   pdfProviderConfig?: {
     apiKey?: string;
     baseUrl?: string;

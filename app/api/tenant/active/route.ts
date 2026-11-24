@@ -13,6 +13,7 @@ import { resolveAuthConfig, TENANT_ID_PATTERN } from '@/lib/server/auth/config';
 import { clearedSessionCookieHeader, resolveApplicationSession } from '@/lib/server/auth/session';
 import { switchActiveTenant, TenantAdminError } from '@/lib/server/auth/tenant-admin';
 import { tenantAdminFailure } from '@/lib/server/auth/authorize';
+import { REQUEST_ID_HEADER, resolveRequestId } from '@/lib/server/request-id';
 
 export const runtime = 'nodejs';
 
@@ -29,6 +30,13 @@ function rawError(errorCode: string, status: number, extra: Record<string, strin
 }
 
 export async function POST(req: NextRequest): Promise<Response> {
+  const requestId = resolveRequestId(req.headers);
+  const response = await postTenantActive(req);
+  response.headers.set(REQUEST_ID_HEADER, requestId);
+  return response;
+}
+
+async function postTenantActive(req: NextRequest): Promise<Response> {
   let config;
   try {
     config = resolveAuthConfig();

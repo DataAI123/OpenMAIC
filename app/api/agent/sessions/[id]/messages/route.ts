@@ -11,6 +11,7 @@ import { scheduleConversationTitle } from '@/lib/server/agent-runtime/conversati
 import { withRequestOwnerId } from '@/lib/server/agent-runtime/with-owner';
 import { decodeElementRefs } from '@/lib/workbench/element-refs';
 import { decodeCourseRefs } from '@/lib/workbench/course-refs';
+import { stampRequestId } from '@/lib/server/request-id';
 import {
   bindOwnerMaterialsToSession,
   SessionMaterialBindingError,
@@ -20,7 +21,7 @@ export const runtime = 'nodejs';
 
 export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   if (!isAgentRuntimeConfigured()) {
-    return new Response('Not found', { status: 404 });
+    return stampRequestId(new Response('Not found', { status: 404 }), req.headers);
   }
 
   return withRequestOwnerId(req, async (ownerId, responseHeaders, identity) => {

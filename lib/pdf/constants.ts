@@ -58,3 +58,7 @@ export function getAllPDFProviders(): PDFProviderConfig[] {
 export function getPDFProvider(providerId: PDFProviderId): PDFProviderConfig | undefined {
   return PDF_PROVIDERS[providerId];
 }
+
+export function isPDFProviderId(value: string): value is PDFProviderId {
+  return Object.prototype.hasOwnProperty.call(PDF_PROVIDERS, value);
+}

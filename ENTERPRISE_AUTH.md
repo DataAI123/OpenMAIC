@@ -1,15 +1,17 @@
 # Enterprise authentication rollout
 
-This repository is implementing the enterprise plan in gated increments. The
-default remains `legacy` for existing deployments. In OIDC mode, middleware
-admits only owner-scoped API families, a narrow set of potential public GET
-routes, `/api/auth/*`, and `/api/health`. The Node owner boundary rechecks the
-database-backed session and tenant membership for each admitted request. Other
-business APIs remain `503`, and OIDC may be rolled out with that closed set: the
-routes that stay closed are declared in `ENTERPRISE_ROUTE_INVENTORY.md` (today
-only `/access-code/verify`, whose verified `openmaic_access` cookie can never
-admit a business route in OIDC mode, so the channel is permanently disabled and
-must remain `503`). The Pi director turn (`/api/chat/pi`) and its whiteboard
+This repository implements enterprise access in gated increments. The default
+remains `legacy` for existing deployments. In OIDC mode, middleware admits
+method-specific API routes and a narrow set of public GET patterns; `/api/auth/*`
+and `/api/health` have their own rules. Owner-scoped Node handlers recheck the
+database-backed session, tenant membership, role and resource policy. Tenant
+administration, asset access, media generation, transcription, classroom jobs
+and video-render operations have separate handler policies. The route inventory
+is a coverage aid; `middleware.ts`, the handlers and their tests together define
+actual behavior. Requests outside the applicable allowlist return `503`.
+Access-code verification remains closed in OIDC mode because the verified
+`openmaic_access` cookie cannot admit a business request. The Pi director turn
+(`/api/chat/pi`) and its whiteboard
 visibility callback are admitted as owner-scoped POSTs: the turn charges a
 per-user `chat_pi` fixed window before any provider call, and the callback runs
 behind the same owner boundary plus the persistence principal so a logged-in
@@ -20,18 +22,21 @@ status probe is admitted as a degraded, non-authenticating read: in OIDC mode
 or mints a credential. The release gate and rollback path are in "Deployment and
 rollback" below.
 
-The currently admitted owner-scoped API families are stages, stage metadata,
-folders, materials, skills, agent sessions/events, and the document/runtime
-subpaths of `/api/persistence`. Unauthenticated public reads are limited to
-specific stage document, scenes, manifest/status, stage metadata, document
-persistence, and asset-content GET patterns. Each handler checks owner,
-published visibility, and tombstones; private or tombstoned resources answer
-`404`. OIDC asset allocations use a per-user principal. Asset content is
-readable by its owner or through a live public course reference whose owner
-matches that principal. Legacy shared assets are readable publicly only when a
-published legacy anonymous course references them. Asset replacement and
-deletion remain disabled. Cost-generating APIs, provider configuration routes,
-and all other unreviewed APIs remain closed in OIDC mode.
+The admitted owner-scoped routes include stages, stage metadata, folders,
+materials, skills, agent sessions/events, document/runtime persistence, chat,
+course generation and selected provider operations. The gate also has explicit
+entries for tenant administration, assets, classroom jobs/media, generation,
+transcription, media proxying and video export. These entries do not grant
+anonymous access: each handler still enforces its owner, tenant, role, rate,
+quota, input and resource rules. Unauthenticated public reads remain limited to
+the specific stage document/scenes/manifest/status, stage metadata, document
+persistence and asset-content GET patterns; their handlers check publication
+and tombstones, and private or tombstoned resources answer `404`. OIDC asset
+allocations use a per-user principal. Asset content is readable by its owner or
+through a live public course reference whose owner matches that principal.
+Legacy shared assets are readable publicly only when a published legacy
+anonymous course references them. Asset replacement and deletion remain
+disabled. Paths and methods outside the reviewed entries remain closed.
 
 ## Client access channel
 
@@ -464,6 +469,43 @@ legacy user contend for a single window.
   an abandoned or never-polled job ages out and stops counting — a binding cannot
   lock its owner out permanently.
 
+#### Request-id correlation on every enterprise exit (batch 28)
+
+Until this batch only two routes carried a correlation id, each with its own
+local copy of the pattern: `POST /api/materials` and the embedded persistence
+route. The owner boundary's own gate rejections (`401 LOGIN_REQUIRED`,
+`403 FORBIDDEN`/`INVALID_ORIGIN`/`TENANT_REQUIRED`, `503 AUTH_UNAVAILABLE`) and
+its `500` catch returned no id, and edge middleware's OIDC `503`/`401` had none
+either — so exactly the failures a client most needs to trace were the ones
+without a handle.
+
+- **One shared helper.** `lib/server/request-id.ts` exports
+  `resolveRequestId(headers)`: it adopts an upstream `x-request-id` only when it
+  matches `/^[A-Za-z0-9._:-]{1,128}$/` (printable, no whitespace or
+  header-breaking characters) and otherwise mints a UUID. It uses the Web Crypto
+  global rather than `node:crypto`, so the edge middleware can import it too.
+- **The boundary mints once and echoes everywhere.** `withRequestOwnerId` and
+  `resolveRequestOwnerIdForRequest` resolve the id a single time and stamp it on
+  every exit: the success `responseHeaders` (so handlers' 200/4xx/5xx ride it),
+  each gate rejection built inside the resolver, and the `500` catch — whose log
+  line now names the same id (`requestId=<id>`). A caller that already minted an
+  id for its own logging context passes it through the new
+  `RequestOwnerOptions.requestId` so the log and the response never disagree.
+- **The three SSE routes benefit unchanged.** `agent/owner-events`,
+  `agent/sessions/{id}/events` and `stages/{id}/freshness` call
+  `resolveRequestOwnerIdForRequest` directly; stamping inside the resolver gives
+  them the id on their gate rejections and echo headers with no route edit.
+- **Edge rejections.** Middleware stamps the id itself on the OIDC `503`
+  (route not enabled) and `401` (login required) responses, which never reach a
+  handler.
+- **No behavior change for the two existing owners.** `materials` and
+  `persistence` now call the shared helper instead of their own copy of the
+  pattern. `persistence` threads its id into the boundary (so its 5xx log line
+  still names the same id it echoes). `materials` keeps its own logging id and
+  pins it *after* appending the boundary's echo set — `set` collapses any
+  duplicate — so the response carries one value that matches the log line rather
+  than a second, conflicting header.
+
 #### Process-local state and cache keys: audit conclusion
 
 A sweep of process-local state and cache keys found no tenant-crossing store
@@ -556,7 +598,7 @@ startup.
 
 - **R0 Preflight.** Record the application commit, the database server version,
   and the target environment. Confirm the migration series (currently `0001`
-  through `0019`) matches the release and that the runner reaches the intended
+  through `0023`) matches the release and that the runner reaches the intended
   database. An isolated rehearsal must not reuse the deployment's own
   `DATABASE_URL`.
 - **R1 Backup.** Take a timestamped `pg_dump`, record its size and exit code,
@@ -570,7 +612,7 @@ startup.
   release, inspect on an isolated copy, and do not hand-mark a migration as
   applied.
 - **R3 Database acceptance.** Verify one correct name and checksum per version
-  `0001` through `0019` in `schema_migrations`; check that the rate-limit
+  `0001` through `0023` in `schema_migrations`; check that the rate-limit
   route-key CHECK includes every admitted key, that the quota policy seed values
   are present, and that the owner/tenant columns and foreign keys exist.
   Re-running the migrator must report no changes.

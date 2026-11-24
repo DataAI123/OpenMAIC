@@ -46,6 +46,8 @@ import {
   withGenerationRetry,
   type GenerationRetryOptions,
 } from '@openmaic/generation/browser';
+import { shouldRetryGenerationResult } from '@/lib/generation/client-failure';
+import { parseRetryAfterSeconds } from '@/lib/generation/retry-after';
 
 const log = createLogger('SceneGenerator');
 
@@ -56,6 +58,8 @@ interface SceneContentResult {
   error?: string;
   errorCode?: string;
   statusCode?: number;
+  retryAfterSeconds?: number;
+  requestId?: string;
 }
 
 interface SceneActionsResult {
@@ -65,11 +69,15 @@ interface SceneActionsResult {
   error?: string;
   errorCode?: string;
   statusCode?: number;
+  retryAfterSeconds?: number;
+  requestId?: string;
 }
 
 type ClientRetryOptions<T> = Partial<
   Omit<GenerationRetryOptions<T>, 'label' | 'shouldRetryResult' | 'signal'>
 >;
+
+const REQUEST_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
 
 function getApiHeaders(): HeadersInit {
   const config = getCurrentModelConfig();
@@ -114,18 +122,37 @@ function createHttpError(
   response: Response,
   data: { details?: unknown; error?: unknown; errorCode?: unknown },
   fallback: string,
-): Error & { errorCode?: string; statusCode?: number } {
+): Error & {
+  errorCode?: string;
+  statusCode?: number;
+  retryAfterSeconds?: number;
+  requestId?: string;
+  isRetryable?: boolean;
+} {
   const message =
     typeof data.details === 'string'
       ? data.details
       : typeof data.error === 'string'
         ? data.error
         : `${fallback}: HTTP ${response.status}`;
-  const error = new Error(message) as Error & { errorCode?: string; statusCode?: number };
+  const error = new Error(message) as Error & {
+    errorCode?: string;
+    statusCode?: number;
+    retryAfterSeconds?: number;
+    requestId?: string;
+    isRetryable?: boolean;
+  };
   if (typeof data.errorCode === 'string') {
     error.errorCode = data.errorCode;
   }
   error.statusCode = response.status;
+  const requestId = response.headers.get('x-request-id')?.trim();
+  if (requestId && REQUEST_ID_PATTERN.test(requestId)) error.requestId = requestId;
+  const retryAfterSeconds = parseRetryAfterSeconds(response.headers.get('retry-after'));
+  if (retryAfterSeconds !== undefined) error.retryAfterSeconds = retryAfterSeconds;
+  // A 429 is shown with its Retry-After value and waits for an explicit user
+  // retry; exponential backoff here would ignore the server's instruction.
+  if (response.status === 429) error.isRetryable = false;
   return error;
 }
 
@@ -133,12 +160,23 @@ function messageFromError(error: unknown, fallback: string): string {
   return error instanceof Error ? error.message : fallback;
 }
 
-function errorMeta(error: unknown): Pick<SceneContentResult, 'errorCode' | 'statusCode'> {
+function errorMeta(
+  error: unknown,
+): Pick<SceneContentResult, 'errorCode' | 'statusCode' | 'retryAfterSeconds' | 'requestId'> {
   if (!error || typeof error !== 'object') return {};
-  const record = error as { errorCode?: unknown; statusCode?: unknown };
+  const record = error as {
+    errorCode?: unknown;
+    statusCode?: unknown;
+    retryAfterSeconds?: unknown;
+    requestId?: unknown;
+  };
   return {
     ...(typeof record.errorCode === 'string' ? { errorCode: record.errorCode } : {}),
     ...(typeof record.statusCode === 'number' ? { statusCode: record.statusCode } : {}),
+    ...(typeof record.retryAfterSeconds === 'number'
+      ? { retryAfterSeconds: record.retryAfterSeconds }
+      : {}),
+    ...(typeof record.requestId === 'string' ? { requestId: record.requestId } : {}),
   };
 }
 
@@ -182,7 +220,7 @@ export async function fetchSceneContent(
       },
       {
         label: `scene content "${params.outline.title}"`,
-        shouldRetryResult: (result) => !result.success || !result.content,
+        shouldRetryResult: (result) => shouldRetryGenerationResult(result, Boolean(result.content)),
         ...retryOptions,
         signal,
       },
@@ -231,7 +269,7 @@ export async function fetchSceneActions(
       },
       {
         label: `scene actions "${params.outline.title}"`,
-        shouldRetryResult: (result) => !result.success || !result.scene,
+        shouldRetryResult: (result) => shouldRetryGenerationResult(result, Boolean(result.scene)),
         ...retryOptions,
         signal,
       },

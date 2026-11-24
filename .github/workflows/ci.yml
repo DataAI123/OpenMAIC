@@ -63,6 +63,8 @@ jobs:
             echo 'ci-run-parallel.sh should have failed'
             exit 1
           fi
+          node --test scripts/assert-enterprise-regression-suites.test.mjs
+          node --test scripts/audit-usage-snapshot.test.mjs
 
       - uses: pnpm/action-setup@v5
 
@@ -150,6 +152,71 @@ jobs:
       # contention, not a product regression).
       - name: Unit Tests
         run: pnpm test
+
+      # This is a required, hermetic enterprise slice. The JSON audit fails if
+      # any named suite stops being collected or contains skipped cases; the
+      # environment keeps local secrets and PostgreSQL/provider connections out.
+      - name: Required enterprise regression contracts
+        env:
+          ENTERPRISE_REGRESSION_REQUIRED: '1'
+          TEST_LOAD_LOCAL_ENV: '0'
+          DATABASE_URL: ''
+          OPENMAIC_AGENT_RUNTIME_ENABLED: 'false'
+        run: |
+          set -euo pipefail
+          results="$RUNNER_TEMP/enterprise-regression-vitest.json"
+          # Several required tenant suites boot isolated PGlite instances;
+          # cap file workers so they do not starve one another past test hooks.
+          pnpm exec vitest run --maxWorkers=2 --reporter=default --reporter=json \
+            --outputFile.json="$results" \
+            tests/api/tenant-active.test.ts \
+            tests/api/tenant-members.test.ts \
+            tests/api/tenant-membership-lifecycle.test.ts \
+            tests/server/auth-session-tenant.test.ts \
+            tests/persistence/agent-session-tenant.test.ts \
+            tests/api/agent-sessions-tenant.test.ts \
+            tests/api/persistence-tenant-boundary.test.ts \
+            tests/persistence/owner-materials-tenant-boundary.test.ts \
+            tests/persistence/quota-tenant-boundaries-migration.test.ts \
+            tests/persistence/rate-limit-tenant-boundary-migration.test.ts \
+            tests/persistence/resource-tenant-boundaries-migration.test.ts \
+            tests/persistence/resource-tenant-boundaries-assets-migration.test.ts \
+            tests/persistence/full-migration-chain.test.ts \
+            tests/agent-runtime/persistence-routes-gate.test.ts \
+            tests/api/health-live.test.ts \
+            tests/api/health-ready.test.ts \
+            tests/api/auth-request-id.test.ts \
+            tests/api/auth-callback.test.ts \
+            tests/server/access-code-status-route.test.ts \
+            tests/server/access-code-verify-route.test.ts \
+            tests/server/request-id-owner-gate.test.ts \
+            tests/server/health-access-code.test.ts \
+            tests/server/video-export-capability.test.ts \
+            tests/server/middleware-oidc.test.ts \
+            tests/auth/client-login.test.ts \
+            tests/workbench/workspace-actions-auth.test.ts \
+            tests/agent-runtime/runtime-probe.test.ts \
+            tests/agent-runtime/sessions-route.test.ts \
+            tests/agent-runtime/session-detail-route.test.ts \
+            tests/agent-runtime/session-status-route.test.ts \
+            tests/agent-runtime/cancel-route.test.ts \
+            tests/agent-runtime/messages-route.test.ts \
+            tests/agent-runtime/skills-route.test.ts \
+            tests/agent-runtime/skill-detail-route.test.ts \
+            tests/agent-runtime/session-events-route.test.ts \
+            tests/agent-runtime/owner-events-route.test.ts \
+            tests/agent-runtime/stage-freshness-route.test.ts \
+            tests/agent-runtime/export-video-ownership.test.ts \
+            tests/agent-runtime/stages-route.test.ts \
+            tests/agent-runtime/stage-detail-route.test.ts \
+            tests/agent-runtime/material-detail-route.test.ts \
+            tests/agent-runtime/stage-meta-routes.test.ts \
+            tests/api/classroom-media-range.test.ts \
+            tests/api/verify-pdf-provider.test.ts \
+            tests/api/verify-image-provider.test.ts \
+            tests/api/verify-video-provider.test.ts \
+            tests/generation/safe-session.test.ts
+          node scripts/assert-enterprise-regression-suites.mjs "$results"
 
       - name: Unit Tests (importer)
         run: pnpm --filter @openmaic/importer test
@@ -280,6 +347,9 @@ jobs:
           echo "::error::Playwright Chromium download failed after 3 attempts."
           exit 1
 
+      - name: Test enterprise E2E result guard
+        run: node --test scripts/assert-enterprise-e2e-results.test.mjs
+
       # Measures the emitted cover cards in Chromium. Lives with the unit tests
       # (it needs the compiler), but only this job has a browser, so it runs
       # here with the flag that turns a missing one into a failure.
@@ -355,6 +425,174 @@ jobs:
           name: playwright-report
           path: playwright-report/
           retention-days: 7
+
+  enterprise-oidc-e2e:
+    name: Enterprise OIDC E2E (PostgreSQL + Keycloak + HTTPS)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: openmaic
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d openmaic"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/openmaic
+      APP_ORIGIN: https://localhost:3002
+      OIDC_ISSUER: https://localhost:8443/realms/openmaic
+      OIDC_REDIRECT_URI: https://localhost:3002/api/auth/callback
+      OIDC_CLIENT_ID: openmaic-e2e
+      OIDC_CLIENT_SECRET: openmaic-e2e-only-client-secret
+      OIDC_AUTO_PROVISION_USERS: 'false'
+      OIDC_DEFAULT_TENANT: default
+      OPENMAIC_AUTH_MODE: oidc
+      SESSION_TTL_SECONDS: '900'
+      OPENMAIC_AGENT_RUNTIME_ENABLED: 'false'
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: pnpm/action-setup@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Install Playwright Chromium
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            if timeout -k 10 240 pnpm exec playwright install chromium; then
+              exit 0
+            fi
+            echo "Playwright Chromium download attempt ${attempt} failed, retrying..."
+            sleep 5
+          done
+          echo "::error::Playwright Chromium download failed after 3 attempts."
+          exit 1
+
+      - name: Confirm isolated environment and create trusted HTTPS certificate
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -e .env.local ]; then
+            echo '::error::.env.local must not be present in the enterprise E2E checkout.'
+            exit 1
+          fi
+          openssl genrsa -out "$RUNNER_TEMP/openmaic-e2e-ca.key" 2048
+          openssl req -x509 -new -nodes -key "$RUNNER_TEMP/openmaic-e2e-ca.key" \
+            -sha256 -days 2 -subj '/CN=OpenMAIC Enterprise E2E CA' \
+            -out "$RUNNER_TEMP/openmaic-e2e-ca.crt"
+          openssl genrsa -out "$RUNNER_TEMP/openmaic-e2e-tls.key" 2048
+          openssl req -new -key "$RUNNER_TEMP/openmaic-e2e-tls.key" \
+            -subj '/CN=localhost' -out "$RUNNER_TEMP/openmaic-e2e-tls.csr"
+          printf 'subjectAltName=DNS:localhost\nextendedKeyUsage=serverAuth\n' \
+            > "$RUNNER_TEMP/openmaic-e2e-ext.cnf"
+          openssl x509 -req -in "$RUNNER_TEMP/openmaic-e2e-tls.csr" \
+            -CA "$RUNNER_TEMP/openmaic-e2e-ca.crt" -CAkey "$RUNNER_TEMP/openmaic-e2e-ca.key" \
+            -CAcreateserial -out "$RUNNER_TEMP/openmaic-e2e-tls.crt" -days 2 -sha256 \
+            -extfile "$RUNNER_TEMP/openmaic-e2e-ext.cnf"
+          sudo install -m 0644 "$RUNNER_TEMP/openmaic-e2e-ca.crt" \
+            /usr/local/share/ca-certificates/openmaic-enterprise-e2e.crt
+          sudo update-ca-certificates
+          {
+            echo "NODE_EXTRA_CA_CERTS=$RUNNER_TEMP/openmaic-e2e-ca.crt"
+            echo "ENTERPRISE_E2E_TLS_CERT=$RUNNER_TEMP/openmaic-e2e-tls.crt"
+            echo "ENTERPRISE_E2E_TLS_KEY=$RUNNER_TEMP/openmaic-e2e-tls.key"
+            echo "OPENMAIC_SESSION_SIGNING_KEY=$(openssl rand -base64 48 | tr '+/' '-_' | tr -d '=\n')"
+            echo "OPENMAIC_OIDC_FLOW_KEY=$(openssl rand -base64 48 | tr '+/' '-_' | tr -d '=\n')"
+          } >> "$GITHUB_ENV"
+
+      - name: Start disposable Keycloak realm
+        run: |
+          docker run --detach --name openmaic-enterprise-keycloak \
+            --publish 8081:8080 \
+            --volume "$GITHUB_WORKSPACE/tests/e2e/keycloak:/opt/keycloak/data/import:ro" \
+            --env KC_BOOTSTRAP_ADMIN_USERNAME=admin \
+            --env KC_BOOTSTRAP_ADMIN_PASSWORD=disposable-ci-admin-password \
+            quay.io/keycloak/keycloak:26.7.5 start-dev \
+              --import-realm \
+              --http-enabled=true \
+              --hostname=https://localhost:8443 \
+              --proxy-headers=xforwarded \
+              --proxy-trusted-addresses=127.0.0.1/32,172.16.0.0/12
+
+      - name: Start TLS proxy and wait for the isolated Keycloak realm
+        shell: bash
+        run: |
+          set -euo pipefail
+          nohup node scripts/enterprise-e2e-https-proxy.mjs \
+            > "$RUNNER_TEMP/enterprise-e2e-proxy.log" 2>&1 < /dev/null &
+          echo "$!" > "$RUNNER_TEMP/enterprise-e2e-proxy.pid"
+          for attempt in $(seq 1 60); do
+            if ! kill -0 "$(cat "$RUNNER_TEMP/enterprise-e2e-proxy.pid")" 2>/dev/null; then
+              cat "$RUNNER_TEMP/enterprise-e2e-proxy.log"
+              exit 1
+            fi
+            if curl --fail --silent --show-error \
+              https://localhost:8443/realms/openmaic/.well-known/openid-configuration \
+              -o "$RUNNER_TEMP/openmaic-e2e-oidc.json"; then
+              break
+            fi
+            sleep 2
+          done
+          test -s "$RUNNER_TEMP/openmaic-e2e-oidc.json"
+          node -e "const x=require(process.argv[1]); if(x.issuer!==process.env.OIDC_ISSUER) process.exit(1)" \
+            "$RUNNER_TEMP/openmaic-e2e-oidc.json"
+
+      - name: Migrate isolated database and provision test identities
+        shell: bash
+        run: |
+          set -euo pipefail
+          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f tests/e2e/enterprise-baseline.sql
+          pnpm db:migrate
+          pnpm enterprise:provision-user --issuer "$OIDC_ISSUER" \
+            --subject 8c1d8120-15ec-49d1-b7de-26014bca9121 --role owner \
+            --display-name 'Enterprise E2E Owner' --email owner@example.test
+          pnpm enterprise:provision-user --issuer "$OIDC_ISSUER" \
+            --subject 5ba11d64-02c3-4d78-b696-99ac0ed5dbab --role viewer \
+            --display-name 'Enterprise E2E Viewer' --email viewer@example.test
+          pnpm enterprise:provision-user --issuer "$OIDC_ISSUER" \
+            --subject ca584c2e-4d79-48b4-8742-f9722c520a27 --role owner \
+            --display-name 'Enterprise E2E Selector' --email selector@example.test
+          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 \
+            -f tests/e2e/enterprise-multitenant-membership.sql
+
+      - name: Build production application
+        run: pnpm build
+        env:
+          NEXT_PUBLIC_MAIC_EDITOR_ENABLED: 'true'
+          NEXT_PUBLIC_PI_CHAT_ENABLED: 'true'
+          NEXT_PUBLIC_COURSEWARE_REFERENCE_ENABLED: 'true'
+
+      - name: Run required enterprise OIDC browser tests
+        run: |
+          set -euo pipefail
+          pnpm exec playwright test --config=playwright.enterprise.config.ts --reporter=list,json
+          node scripts/assert-enterprise-e2e-results.mjs "$PLAYWRIGHT_JSON_OUTPUT_FILE"
+        env:
+          ENTERPRISE_E2E_REQUIRED: '1'
+          PLAYWRIGHT_JSON_OUTPUT_FILE: ${{ runner.temp }}/enterprise-oidc-playwright.json
+
+      - name: Stop TLS proxy
+        if: always()
+        shell: bash
+        run: |
+          if [ -f "$RUNNER_TEMP/enterprise-e2e-proxy.pid" ]; then
+            kill "$(cat "$RUNNER_TEMP/enterprise-e2e-proxy.pid")" 2>/dev/null || true
+          fi
+          docker rm --force openmaic-enterprise-keycloak >/dev/null 2>&1 || true
 
   docker-main-image:
     name: Main image (deps + builder)

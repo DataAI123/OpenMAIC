@@ -40,14 +40,17 @@ vi.mock('@/lib/logger', () => ({
   createLogger: () => ({ info: vi.fn(), warn: vi.fn(), error: mocks.loggerError, debug: vi.fn() }),
 }));
 
-function request(): Request {
+function request(requestId?: string): Request {
   const body = new FormData();
   body.append('audio', new File(['audio bytes'], 'private.mp3', { type: 'audio/mpeg' }));
   body.append('providerId', 'openai');
   body.append('modelId', 'whisper-1');
   return new Request('https://openmaic.example.com/api/transcription', {
     method: 'POST',
-    headers: { origin: 'https://openmaic.example.com' },
+    headers: {
+      origin: 'https://openmaic.example.com',
+      ...(requestId ? { 'x-request-id': requestId } : {}),
+    },
     body,
   });
 }
@@ -112,12 +115,25 @@ describe('POST /api/transcription OIDC identity boundary', () => {
     expect(mocks.loggerError).toHaveBeenCalledWith('Transcription failed for an OIDC request');
   });
 
-  it('preserves the legacy route without requiring an OIDC owner boundary', async () => {
+  it('preserves the legacy route and correlates its response without an OIDC owner boundary', async () => {
     mocks.resolveAuthConfig.mockReturnValue({ mode: 'legacy' });
     const { POST } = await import('@/app/api/transcription/route');
-    const response = await POST(request() as unknown as NextRequest);
+    const response = await POST(request('legacy-asr-request') as unknown as NextRequest);
 
     expect(mocks.withRequestOwnerId).not.toHaveBeenCalled();
     expect(response.status).toBe(200);
+    expect(response.headers.get('x-request-id')).toBe('legacy-asr-request');
+  });
+
+  it('correlates the unavailable response when auth configuration cannot be read', async () => {
+    mocks.resolveAuthConfig.mockImplementation(() => {
+      throw new Error('private configuration detail');
+    });
+    const { POST } = await import('@/app/api/transcription/route');
+    const response = await POST(request('configuration-failure') as unknown as NextRequest);
+
+    expect(response.status).toBe(503);
+    expect(response.headers.get('x-request-id')).toBe('configuration-failure');
+    await expect(response.json()).resolves.toMatchObject({ errorCode: 'INTERNAL_ERROR' });
   });
 });

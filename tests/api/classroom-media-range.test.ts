@@ -8,6 +8,7 @@ const mocks = vi.hoisted(() => ({
   stat: vi.fn(),
   createReadStream: vi.fn(),
   readClassroom: vi.fn(),
+  logError: vi.fn(),
   identity: { ownerId: 'anon:media-test' } as { ownerId: string; tenantId?: string },
 }));
 
@@ -20,7 +21,7 @@ vi.mock('@/lib/logger', () => ({
   createLogger: () => ({
     info: vi.fn(),
     warn: vi.fn(),
-    error: vi.fn(),
+    error: mocks.logError,
     debug: vi.fn(),
   }),
 }));
@@ -32,13 +33,18 @@ vi.mock('@/lib/server/classroom-storage', async (importOriginal) => ({
 
 vi.mock('@/lib/server/agent-runtime/with-owner', () => ({
   withRequestOwnerId: async (
-    _req: Request,
+    req: Request,
     handler: (
       ownerId: string,
       responseHeaders: Headers,
       identity?: { ownerId: string; tenantId?: string },
     ) => Promise<Response>,
-  ) => handler(mocks.identity.ownerId, new Headers(), mocks.identity),
+  ) => {
+    const responseHeaders = new Headers({
+      'x-request-id': req.headers.get('x-request-id') ?? 'test-generated-request-id',
+    });
+    return handler(mocks.identity.ownerId, responseHeaders, mocks.identity);
+  },
 }));
 
 import { GET } from '@/app/api/classroom-media/[classroomId]/[...path]/route';
@@ -57,9 +63,12 @@ function fakeReadStream(chunks: string[]) {
   return emitter;
 }
 
-function get(range?: string) {
+function get(range?: string, requestId = 'classroom-media-request') {
   const req = new Request('http://localhost/api/classroom-media/classroom-1/media/clip.mp4', {
-    headers: range ? { Range: range } : {},
+    headers: {
+      ...(range ? { Range: range } : {}),
+      'x-request-id': requestId,
+    },
   });
   return GET(req as unknown as NextRequest, {
     params: Promise.resolve({ classroomId: CLASSROOM_ID, path: ['media', 'clip.mp4'] }),
@@ -86,6 +95,7 @@ describe('GET /api/classroom-media range support', () => {
     expect(res.headers.get('Content-Type')).toBe('video/mp4');
     expect(res.headers.get('Accept-Ranges')).toBe('bytes');
     expect(res.headers.get('Cache-Control')).toBe('public, max-age=86400, immutable');
+    expect(res.headers.get('x-request-id')).toBe('classroom-media-request');
     expect(mocks.createReadStream).toHaveBeenCalledWith(expect.any(String));
     expect(await res.text()).toBe('x'.repeat(FILE_SIZE));
   });
@@ -154,6 +164,36 @@ describe('GET /api/classroom-media range support', () => {
     expect(response.status).toBe(200);
     expect(mocks.readClassroom).toHaveBeenCalledWith(CLASSROOM_ID);
     expect(response.headers.get('Cache-Control')).toBe('private, no-store');
+  });
+
+  it('correlates ownership lookup failures without logging the raw error', async () => {
+    mocks.identity = { ownerId: 'user:alice', tenantId: 'default' };
+    mocks.readClassroom.mockRejectedValue(new Error('database password must not be logged'));
+
+    const response = await get(undefined, 'classroom-media-owner-failure');
+
+    expect(response.status).toBe(500);
+    expect(response.headers.get('x-request-id')).toBe('classroom-media-owner-failure');
+    expect(mocks.logError).toHaveBeenCalledWith('Classroom ownership lookup failed', {
+      requestId: 'classroom-media-owner-failure',
+      errorType: 'Error',
+    });
+    expect(JSON.stringify(mocks.logError.mock.calls)).not.toContain('database password');
+  });
+
+  it('correlates filesystem failures without logging paths or raw errors', async () => {
+    mocks.realpath.mockRejectedValue(new Error('filesystem secret'));
+
+    const response = await get(undefined, 'classroom-media-file-failure');
+
+    expect(response.status).toBe(500);
+    expect(response.headers.get('x-request-id')).toBe('classroom-media-file-failure');
+    expect(mocks.logError).toHaveBeenCalledWith('Classroom media serving failed', {
+      requestId: 'classroom-media-file-failure',
+      errorType: 'Error',
+    });
+    expect(JSON.stringify(mocks.logError.mock.calls)).not.toContain('filesystem secret');
+    expect(JSON.stringify(mocks.logError.mock.calls)).not.toContain('clip.mp4');
   });
 
   it('hides OIDC classroom assets across owner and tenant boundaries', async () => {

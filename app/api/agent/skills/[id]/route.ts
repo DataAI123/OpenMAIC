@@ -11,11 +11,14 @@ import {
   UserSkillError,
 } from '@/lib/server/agent-runtime/user-skills';
 import { withRequestOwnerId } from '@/lib/server/agent-runtime/with-owner';
+import { stampRequestId } from '@/lib/server/request-id';
 
 export const runtime = 'nodejs';
 
 export async function GET(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
-  if (!isAgentRuntimeConfigured()) return new Response('Not found', { status: 404 });
+  if (!isAgentRuntimeConfigured()) {
+    return stampRequestId(new Response('Not found', { status: 404 }), req.headers);
+  }
   return withRequestOwnerId(req, async (ownerId, responseHeaders) => {
     const { id } = await params;
     const skill = await findUserSkill(id, ownerId);
@@ -28,7 +31,9 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
 }
 
 export async function DELETE(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
-  if (!isAgentRuntimeConfigured()) return new Response('Not found', { status: 404 });
+  if (!isAgentRuntimeConfigured()) {
+    return stampRequestId(new Response('Not found', { status: 404 }), req.headers);
+  }
   return withRequestOwnerId(req, async (ownerId, responseHeaders) => {
     const { id } = await params;
     if (!id.startsWith('usk_')) {

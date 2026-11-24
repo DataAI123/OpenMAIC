@@ -74,6 +74,10 @@ function currentIdentity(source, route, method) {
 
 function policyFor(route, method) {
   if (route === '/health') return '公开：健康探针；仅输出非敏感状态';
+  if (route === '/health/live')
+    return '公开 GET/HEAD：进程存活探针；不查询数据库、存储或供应商，仅输出非敏感状态';
+  if (route === '/health/ready')
+    return '公开 GET/HEAD：应用就绪探针；仅返回最小可用状态，不暴露依赖详情';
   if (route === '/access-code/status') {
     return '公开状态探针：只报告访问码通道的启用/认证状态，不得授予企业业务权限；OIDC 下恒为 enabled:false 且不读取或签发任何凭据';
   }
@@ -197,6 +201,10 @@ function policyFor(route, method) {
 
 function oidcGateFor(route, method) {
   if (route === '/health') return '公开 GET：仅健康探针';
+  if (route === '/health/live')
+    return '精确 GET/HEAD：公开进程存活探针；其他方法和子路径仍受默认拒绝';
+  if (route === '/health/ready')
+    return '精确 GET/HEAD：公开应用就绪探针；其他方法和子路径仍受默认拒绝';
   if (route.startsWith('/auth/')) return 'OIDC 协议入口：各处理器验证 state/session/origin';
   if (route === '/access-code/status') {
     return method === 'GET'

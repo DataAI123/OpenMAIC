@@ -263,8 +263,12 @@ describe('tenant membership lifecycle routes', () => {
 
   it('lets a tenant-required session leave its own tenant', async () => {
     tenantRequired();
-    const response = await postLeave({ tenantId: 'default' }, { origin: APP_ORIGIN });
+    const response = await postLeave(
+      { tenantId: 'default' },
+      { origin: APP_ORIGIN, 'x-request-id': 'tenant-leave:check' },
+    );
     expect(response.status).toBe(200);
+    expect(response.headers.get('x-request-id')).toBe('tenant-leave:check');
     expect(response.headers.get('cache-control')).toBe('private, no-store');
     expect(await response.json()).toEqual({
       success: true,

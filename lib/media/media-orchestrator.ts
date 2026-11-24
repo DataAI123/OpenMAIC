@@ -29,8 +29,10 @@ import { commitToPool } from '@/lib/media/commit-to-pool';
 import {
   ASSET_QUOTA_EXCEEDED,
   isRetryableMediaFailure,
+  mediaFailureRecovery,
   isStorageFullFailure,
 } from '@/lib/media/media-failure';
+import { redirectToLogin, refreshTenantSelection } from '@/lib/auth/client-login';
 import {
   indexGeneratedMediaReferences,
   isGeneratedMediaSatisfied,
@@ -358,6 +360,19 @@ export async function retryMediaTask(
   const store = useMediaGenerationStore.getState();
   const task = store.getTask(elementId);
   if (!task || task.status !== 'failed') return;
+
+  // A Retry click is a user decision to try again, but authentication recovery
+  // must complete first. Returning from login/tenant selection leaves the
+  // failed task available so the user can explicitly retry it afterward.
+  const recovery = mediaFailureRecovery(task.errorCode);
+  if (recovery === 'login') {
+    redirectToLogin();
+    return;
+  }
+  if (recovery === 'tenant') {
+    refreshTenantSelection();
+    return;
+  }
 
   // A refusal of the content or the configuration is not retryable, and the
   // affordance that calls this is already hidden for one. Refusing here too

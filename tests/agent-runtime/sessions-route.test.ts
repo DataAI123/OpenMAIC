@@ -393,8 +393,16 @@ describe('agent session collection route', () => {
   it('keeps both collection methods behind the runtime gate', async () => {
     mocks.runtimeEnabled = false;
 
-    expect((await post({ prompt: 'Build' })).status).toBe(404);
-    expect((await GET(new NextRequest('http://localhost/api/agent/sessions'))).status).toBe(404);
+    const postResponse = await post({ prompt: 'Build' }, { 'x-request-id': 'sessions-post-off' });
+    const getResponse = await GET(
+      new NextRequest('http://localhost/api/agent/sessions', {
+        headers: { 'x-request-id': 'sessions-get-off' },
+      }),
+    );
+    expect(postResponse.status).toBe(404);
+    expect(postResponse.headers.get('x-request-id')).toBe('sessions-post-off');
+    expect(getResponse.status).toBe(404);
+    expect(getResponse.headers.get('x-request-id')).toBe('sessions-get-off');
     expect(mocks.resolveRequestOwnerId).not.toHaveBeenCalled();
   });
 });

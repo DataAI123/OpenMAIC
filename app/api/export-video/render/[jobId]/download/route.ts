@@ -5,6 +5,7 @@ import { resolveRenderServiceUrl } from '@/lib/server/render-service';
 import { withRequestOwnerId } from '@/lib/server/agent-runtime/with-owner';
 import { attachOwnerHeaders, guardRenderJobAccess } from '@/lib/server/export-render-access';
 import { createLogger } from '@/lib/logger';
+import { stampRequestId } from '@/lib/server/request-id';
 
 const log = createLogger('ExportVideo Download API');
 
@@ -26,7 +27,10 @@ export async function GET(req: NextRequest, context: { params: Promise<{ jobId: 
   const { jobId } = await context.params;
   const resolved = resolveRenderServiceUrl();
   if ('error' in resolved) {
-    return apiError('PROVIDER_DISABLED', 501, 'Render service is not configured');
+    return stampRequestId(
+      apiError('PROVIDER_DISABLED', 501, 'Render service is not configured'),
+      req.headers,
+    );
   }
 
   return withRequestOwnerId(req, async (ownerId, responseHeaders, identity) => {

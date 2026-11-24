@@ -1,9 +1,10 @@
 import { cookies } from 'next/headers';
-import { apiSuccess } from '@/lib/server/api-response';
+import { apiError, apiSuccess } from '@/lib/server/api-response';
 import { verifyAccessToken } from '@/lib/server/access-token';
 import { resolveAuthConfig } from '@/lib/server/auth/config';
+import { stampRequestId } from '@/lib/server/request-id';
 
-export async function GET() {
+async function handleGet() {
   // OIDC deployments disable the access-code channel outright. Middleware admits
   // this probe so the app-wide AccessCodeGuard reads `enabled: false` instead of
   // falling back to its fail-closed default and rendering a modal that no code
@@ -34,4 +35,18 @@ export async function GET() {
   }
 
   return apiSuccess({ enabled, authenticated });
+}
+
+export async function GET(request: Request) {
+  try {
+    return stampRequestId(await handleGet(), request.headers);
+  } catch (error) {
+    console.error(
+      '[access-code] status route failed',
+      error instanceof Error ? error.name : 'unknown',
+    );
+    const response = apiError('INTERNAL_ERROR', 503, 'Authentication status unavailable');
+    response.headers.set('Cache-Control', 'no-store');
+    return stampRequestId(response, request.headers);
+  }
 }

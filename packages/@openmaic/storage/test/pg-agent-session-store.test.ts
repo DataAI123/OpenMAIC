@@ -53,6 +53,51 @@ describe('PgAgentSessionStore with PGlite', () => {
   });
   runAgentSessionUrlContract('Postgres (PGlite)', () => store);
 
+  test('isolates one owner’s sessions and projections across tenant-scoped stores', async () => {
+    const tenantA = new PgAgentSessionStore(db, {
+      ...optionsFor(db),
+      tenantScope: 'tenant-a',
+    });
+    const tenantB = new PgAgentSessionStore(db, {
+      ...optionsFor(db),
+      tenantScope: 'tenant-b',
+    });
+    const ownerId = 'shared-owner';
+    const sessionA = await tenantA.createSession(
+      makeAgentSessionInput({ id: 'tenant-a-session', ownerId }),
+    );
+    const sessionB = await tenantB.createSession(
+      makeAgentSessionInput({ id: 'tenant-b-session', ownerId }),
+    );
+
+    expect(sessionA.tenantId).toBe('tenant-a');
+    expect(sessionB.tenantId).toBe('tenant-b');
+    await expect(tenantA.getSession(sessionB.id)).resolves.toBeNull();
+    await expect(tenantB.getSession(sessionA.id)).resolves.toBeNull();
+    await expect(tenantA.listSessionsByOwner(ownerId)).resolves.toEqual([sessionA]);
+    await expect(tenantB.listSessionsByOwner(ownerId)).resolves.toEqual([sessionB]);
+
+    await tenantA.appendControlEvent(sessionA.id, {
+      ts: 1,
+      type: 'control',
+      data: { tenant: 'a' },
+    });
+    await tenantB.appendControlEvent(sessionB.id, {
+      ts: 2,
+      type: 'control',
+      data: { tenant: 'b' },
+    });
+    await expect(tenantA.readEventsAfter(sessionB.id, 0)).resolves.toEqual([]);
+    await expect(tenantB.readEventsAfter(sessionA.id, 0)).resolves.toEqual([]);
+
+    const ownerEventsA = await tenantA.readAfter(ownerId, BigInt(0));
+    const ownerEventsB = await tenantB.readAfter(ownerId, BigInt(0));
+    expect(ownerEventsA.map((event) => event.sessionId)).toEqual([sessionA.id]);
+    expect(ownerEventsB.map((event) => event.sessionId)).toEqual([sessionB.id]);
+    await expect(tenantA.readMaxId(ownerId)).resolves.toBe(BigInt(ownerEventsA[0]!.id));
+    await expect(tenantB.readMaxId(ownerId)).resolves.toBe(BigInt(ownerEventsB[0]!.id));
+  });
+
   const textCases = [
     ['before\u0000after', 'beforeafter'],
     ['\uD800left\uDC00', '\uFFFDleft\uFFFD'],

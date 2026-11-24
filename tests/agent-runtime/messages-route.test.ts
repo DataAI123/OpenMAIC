@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { NextRequest } from 'next/server';
 
 const mocks = vi.hoisted(() => ({
+  runtimeConfigured: true,
   getSession: vi.fn(),
   postUserMessage: vi.fn(),
   bindOwnerMaterialsToSession: vi.fn(),
@@ -11,7 +12,7 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('@/lib/config/feature-flags', () => ({
   isAgentRuntimeEnabled: () => true,
-  isAgentRuntimeConfigured: () => true,
+  isAgentRuntimeConfigured: () => mocks.runtimeConfigured,
 }));
 vi.mock('@/lib/server/agent-runtime/owner', () => ({
   resolveRequestOwnerId: (_request: NextRequest, headers: Headers) => {
@@ -48,12 +49,27 @@ function call(body: unknown) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mocks.runtimeConfigured = true;
   mocks.getSession.mockResolvedValue({ id: 'session-1', ownerId: 'owner-1', status: 'succeeded' });
   mocks.postUserMessage.mockResolvedValue({ seq: 4, delivery: 'queued', requeued: true });
   mocks.bindOwnerMaterialsToSession.mockResolvedValue([]);
 });
 
 describe('POST agent session message', () => {
+  it('correlates the runtime-disabled response', async () => {
+    mocks.runtimeConfigured = false;
+    const response = await POST(
+      new NextRequest('http://localhost/api/agent/sessions/session-1/messages', {
+        method: 'POST',
+        headers: { 'x-request-id': 'session-message-off' },
+      }),
+      { params: Promise.resolve({ id: 'session-1' }) },
+    );
+    expect(response.status).toBe(404);
+    expect(response.headers.get('x-request-id')).toBe('session-message-off');
+    expect(mocks.getSession).not.toHaveBeenCalled();
+  });
+
   it('posts a trimmed message with an owner fence and returns its delivery', async () => {
     const response = await call({ text: ' Continue ' });
 

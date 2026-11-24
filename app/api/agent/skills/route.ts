@@ -20,12 +20,13 @@ import {
   parseUserSkillZip,
   UserSkillUploadError,
 } from '@/lib/server/skill-export';
+import { stampRequestId } from '@/lib/server/request-id';
 
 export const runtime = 'nodejs';
 
 export async function GET(req: NextRequest) {
   if (!isAgentRuntimeConfigured()) {
-    return new Response('Not found', { status: 404 });
+    return stampRequestId(new Response('Not found', { status: 404 }), req.headers);
   }
   return withRequestOwnerId(req, async (ownerId, responseHeaders) => {
     const skills = await listSkills(ownerId);
@@ -45,7 +46,9 @@ export async function GET(req: NextRequest) {
 
 /** Upload one owner Skill as the exporter zip or a bare canonical SKILL.md. */
 export async function POST(req: NextRequest) {
-  if (!isAgentRuntimeConfigured()) return new Response('Not found', { status: 404 });
+  if (!isAgentRuntimeConfigured()) {
+    return stampRequestId(new Response('Not found', { status: 404 }), req.headers);
+  }
   return withRequestOwnerId(req, async (ownerId, responseHeaders) => {
     try {
       const form = await req.formData();

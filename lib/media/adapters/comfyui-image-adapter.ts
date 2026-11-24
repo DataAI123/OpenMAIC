@@ -25,7 +25,8 @@ import type {
   ImageGenerationOptions,
   ImageGenerationResult,
 } from '../types';
-import { aspectRatioToDimensions, IMAGE_PROVIDERS } from '../image-providers';
+import { IMAGE_PROVIDERS } from '../constants';
+import { aspectRatioToDimensions } from '../image-providers';
 import { imageProviderFetch } from '../provider-fetch';
 
 // ---------------------------------------------------------------------------

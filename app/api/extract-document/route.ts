@@ -26,6 +26,7 @@ import { apiError, apiSuccess } from '@/lib/server/api-response';
 import { validateUrlForSSRF } from '@/lib/server/ssrf-guard';
 import { MAX_EXTRACT_DOCUMENT_FILE_SIZE_BYTES } from '@/lib/constants/generation';
 import { resolveAuthConfig } from '@/lib/server/auth/config';
+import { stampRequestId } from '@/lib/server/request-id';
 import { withRequestOwnerId } from '@/lib/server/agent-runtime/with-owner';
 import { ownerApiError } from '@/lib/server/agent-runtime/route-response';
 import {
@@ -674,9 +675,12 @@ export async function POST(req: NextRequest) {
   try {
     oidcMode = resolveAuthConfig().mode === 'oidc';
   } catch {
-    return apiError('INTERNAL_ERROR', 503, 'Document extraction is unavailable.');
+    return stampRequestId(
+      apiError('INTERNAL_ERROR', 503, 'Document extraction is unavailable.'),
+      req.headers,
+    );
   }
-  if (!oidcMode) return handlePost(req);
+  if (!oidcMode) return stampRequestId(await handlePost(req), req.headers);
 
   return withRequestOwnerId(req, async (ownerId, responseHeaders, identity) => {
     try {

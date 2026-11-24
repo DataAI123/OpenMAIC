@@ -13,6 +13,7 @@ const mocks = vi.hoisted(() => ({
   withRequestOwnerId: vi.fn(),
   consumePdfProviderVerificationRateLimit: vi.fn(),
   verifyAliDocMindCredentials: vi.fn(),
+  logError: vi.fn(),
 }));
 
 vi.mock('@/lib/server/provider-config', () => ({
@@ -47,7 +48,7 @@ vi.mock('@/lib/logger', () => ({
   createLogger: () => ({
     info: vi.fn(),
     warn: vi.fn(),
-    error: vi.fn(),
+    error: mocks.logError,
     debug: vi.fn(),
   }),
 }));
@@ -76,9 +77,14 @@ describe('POST /api/verify-pdf-provider', () => {
     mocks.validateUrlForSSRFWithPolicy.mockReset().mockResolvedValue(null);
     mocks.allowLocalNetworksEnabled.mockReset().mockReturnValue(false);
     mocks.resolveAuthConfig.mockReset().mockReturnValue({ mode: 'legacy' });
-    mocks.withRequestOwnerId
-      .mockReset()
-      .mockImplementation(async (_req, handler) => handler('user:internal-user', new Headers()));
+    mocks.withRequestOwnerId.mockReset().mockImplementation(async (req, handler) =>
+      handler(
+        'user:internal-user',
+        new Headers({
+          'x-request-id': req.headers.get('x-request-id') ?? 'verify-pdf-test-request',
+        }),
+      ),
+    );
     mocks.consumePdfProviderVerificationRateLimit.mockReset().mockResolvedValue(undefined);
     mocks.verifyAliDocMindCredentials.mockReset().mockResolvedValue({ ok: true });
 
@@ -149,11 +155,11 @@ describe('POST /api/verify-pdf-provider', () => {
   });
 
   it.each([401, 403])('preserves MinerU Cloud authentication handling for %i', async (status) => {
-    const text = vi.fn().mockResolvedValue('invalid token');
+    const cancel = vi.fn().mockResolvedValue(undefined);
     const fetchMock = vi.fn().mockResolvedValue({
       status,
       statusText: 'Unauthorized',
-      text,
+      body: { cancel },
     } as unknown as Response);
     vi.stubGlobal('fetch', fetchMock);
 
@@ -168,14 +174,14 @@ describe('POST /api/verify-pdf-provider', () => {
     expect(json).toEqual({
       success: false,
       errorCode: 'INTERNAL_ERROR',
-      error: 'Authentication failed: invalid token',
+      error: 'Authentication failed: the provider rejected the request',
     });
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(fetchMock).toHaveBeenCalledWith(
       'https://mineru.example.com/extract-results/batch/test-connection',
       expect.objectContaining({ redirect: 'manual' }),
     );
-    expect(text).toHaveBeenCalledTimes(1);
+    expect(cancel).toHaveBeenCalledTimes(1);
   });
 
   it('keeps the existing self-hosted redirect rejection contract', async () => {
@@ -208,14 +214,18 @@ describe('POST /api/verify-pdf-provider', () => {
 
   it('runs only AliDocMind under OIDC with user rate limit, strict BYOK network policy, and no-store', async () => {
     mocks.resolveAuthConfig.mockReturnValue({ mode: 'oidc' });
-    const res = await postVerifyPdfProvider({
-      providerId: 'alidocmind',
-      accessKeyId: 'byok-id',
-      accessKeySecret: 'byok-secret',
-      baseUrl: 'https://docmind.example',
-    });
+    const res = await postVerifyPdfProvider(
+      {
+        providerId: 'alidocmind',
+        accessKeyId: 'byok-id',
+        accessKeySecret: 'byok-secret',
+        baseUrl: 'https://docmind.example',
+      },
+      { 'x-request-id': 'verify-pdf-oidc-success' },
+    );
 
     expect(res.status).toBe(200);
+    expect(res.headers.get('x-request-id')).toBe('verify-pdf-oidc-success');
     expect(res.headers.get('cache-control')).toBe('private, no-store');
     expect(mocks.consumePdfProviderVerificationRateLimit).toHaveBeenCalledWith(
       'user:internal-user',
@@ -290,6 +300,44 @@ describe('POST /api/verify-pdf-provider', () => {
     expect(res.status).toBe(400);
     expect(json.error).toBe('AliDocMind rejected the credentials or the verification request');
     expect(JSON.stringify(json)).not.toContain('upstream-sensitive-value');
+  });
+
+  it('returns a correlated sanitized legacy failure and logs only the error type', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockRejectedValue(new Error('fetch https://private.example/?key=upstream-secret failed'));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const response = await postVerifyPdfProvider(
+      { providerId: 'mineru', baseUrl: 'https://mineru.example.com' },
+      { 'x-request-id': 'verify-pdf-network-failure' },
+    );
+
+    expect(response.status).toBe(500);
+    expect(response.headers.get('x-request-id')).toBe('verify-pdf-network-failure');
+    const body = await response.text();
+    expect(body).not.toContain('upstream-secret');
+    expect(body).not.toContain('private.example');
+    expect(mocks.logError).toHaveBeenCalledWith('PDF provider verification failed', {
+      requestId: 'verify-pdf-network-failure',
+      errorType: 'Error',
+    });
+    expect(JSON.stringify(mocks.logError.mock.calls)).not.toContain('upstream-secret');
+  });
+
+  it('correlates auth-configuration failures without exposing configuration details', async () => {
+    mocks.resolveAuthConfig.mockImplementation(() => {
+      throw new Error('private signing key');
+    });
+
+    const response = await postVerifyPdfProvider(
+      { providerId: 'mineru' },
+      { 'x-request-id': 'verify-pdf-auth-config-failure' },
+    );
+
+    expect(response.status).toBe(503);
+    expect(response.headers.get('x-request-id')).toBe('verify-pdf-auth-config-failure');
+    expect(await response.text()).not.toContain('private signing key');
   });
 
   it('returns 429 with Retry-After when the per-user verification limit is reached', async () => {

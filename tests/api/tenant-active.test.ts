@@ -79,8 +79,9 @@ describe('POST /api/tenant/active', () => {
       sessionId: 'session-1',
       expiresAt: Math.floor(Date.now() / 1000) + 900,
     });
-    const response = await post({ tenantId: 'second' });
+    const response = await post({ tenantId: 'second' }, { 'x-request-id': 'tenant-active:check' });
     expect(response.status).toBe(200);
+    expect(response.headers.get('x-request-id')).toBe('tenant-active:check');
     expect(await response.json()).toEqual({ success: true, tenantId: 'second' });
     expect(response.headers.get('cache-control')).toBe('private, no-store');
     expect(mocks.switchActiveTenant).toHaveBeenCalledWith({

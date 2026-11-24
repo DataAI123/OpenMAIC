@@ -156,8 +156,13 @@ describe('GET /api/materials', () => {
   });
 
   it('rejects a missing sessionId', async () => {
-    const response = await GET(new NextRequest('http://localhost/api/materials'));
+    const response = await GET(
+      new NextRequest('http://localhost/api/materials', {
+        headers: { 'x-request-id': 'materials-missing-session' },
+      }),
+    );
     expect(response.status).toBe(400);
+    expect(response.headers.get('x-request-id')).toBe('materials-missing-session');
     expect(mocks.resolveOwnedSession).not.toHaveBeenCalled();
   });
 
@@ -182,9 +187,12 @@ describe('GET /api/materials', () => {
   it('answers 404 when the agent runtime is not configured', async () => {
     mocks.runtimeConfigured = false;
     const response = await GET(
-      new NextRequest(`http://localhost/api/materials?sessionId=${SESSION_ID}`),
+      new NextRequest(`http://localhost/api/materials?sessionId=${SESSION_ID}`, {
+        headers: { 'x-request-id': 'materials-disabled-get' },
+      }),
     );
     expect(response.status).toBe(404);
+    expect(response.headers.get('x-request-id')).toBe('materials-disabled-get');
   });
 });
 
@@ -363,7 +371,8 @@ describe('POST /api/materials', () => {
 
   it('answers 404 when the agent runtime is not configured', async () => {
     mocks.runtimeConfigured = false;
-    const response = await post(Buffer.from('x'));
+    const response = await post(Buffer.from('x'), { 'x-request-id': 'materials-disabled-post' });
     expect(response.status).toBe(404);
+    expect(response.headers.get('x-request-id')).toBe('materials-disabled-post');
   });
 });

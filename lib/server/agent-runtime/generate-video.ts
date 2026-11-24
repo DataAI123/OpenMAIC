@@ -3,7 +3,8 @@ import type { AssetStore } from '@openmaic/storage';
 import { nanoid } from 'nanoid';
 import { Type, type Static } from 'typebox';
 
-import { generateVideo, normalizeVideoOptions, VIDEO_PROVIDERS } from '@/lib/media/video-providers';
+import { VIDEO_PROVIDERS } from '@/lib/media/constants';
+import { generateVideo, normalizeVideoOptions } from '@/lib/media/video-providers';
 import type {
   VideoGenerationConfig,
   VideoGenerationOptions,

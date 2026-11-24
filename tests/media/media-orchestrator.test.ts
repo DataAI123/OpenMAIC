@@ -6,6 +6,8 @@ const mocks = vi.hoisted(() => ({
   mediaDelete: vi.fn(),
   putAsset: vi.fn(),
   persistReference: vi.fn(),
+  redirectToLogin: vi.fn(),
+  refreshTenantSelection: vi.fn(),
 }));
 
 vi.mock('@/lib/media/asset-pool', () => ({
@@ -18,6 +20,11 @@ vi.mock('@/lib/media/persist-media-reference', () => ({
 
 vi.mock('@/lib/store/settings', () => ({
   useSettingsStore: { getState: mocks.settings },
+}));
+
+vi.mock('@/lib/auth/client-login', () => ({
+  redirectToLogin: mocks.redirectToLogin,
+  refreshTenantSelection: mocks.refreshTenantSelection,
 }));
 
 vi.mock('@/lib/utils/database', () => ({
@@ -80,6 +87,8 @@ describe('classic media orchestrator', () => {
     mocks.mediaDelete.mockReset().mockResolvedValue(undefined);
     mocks.putAsset.mockReset().mockResolvedValue('ast_unexpected');
     mocks.persistReference.mockReset().mockResolvedValue('written');
+    mocks.redirectToLogin.mockReset();
+    mocks.refreshTenantSelection.mockReset();
     mocks.settings.mockReset().mockReturnValue({
       imageGenerationEnabled: true,
       videoGenerationEnabled: true,
@@ -312,6 +321,26 @@ describe('classic media orchestrator', () => {
       retryCount: 1,
     });
   });
+
+  it.each([
+    ['LOGIN_REQUIRED', 'redirectToLogin'],
+    ['TENANT_REQUIRED', 'refreshTenantSelection'],
+  ] as const)(
+    'recovers %s before a user retry can call the provider',
+    async (errorCode, recovery) => {
+      const task = { ...failedTask(imageRef), errorCode };
+      useMediaGenerationStore.setState({ tasks: { [imageRef]: task } });
+
+      await retryMediaTask(imageRef);
+
+      expect(mocks[recovery]).toHaveBeenCalledTimes(1);
+      expect(
+        mocks[recovery === 'redirectToLogin' ? 'refreshTenantSelection' : 'redirectToLogin'],
+      ).not.toHaveBeenCalled();
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(useMediaGenerationStore.getState().getTask(imageRef)?.status).toBe('failed');
+    },
+  );
 
   it('persists structured terminal errors under the placeholder for reload', async () => {
     fetchMock.mockResolvedValue(

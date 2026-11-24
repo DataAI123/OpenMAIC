@@ -2,6 +2,7 @@ import { resolveRequestOwnerId } from './owner';
 import { resolveAuthConfig, type OpenMaicAuthConfig } from '@/lib/server/auth/config';
 import { hasPermission } from '@/lib/server/auth/permissions';
 import { clearedSessionCookieHeader, resolveApplicationSession } from '@/lib/server/auth/session';
+import { REQUEST_ID_HEADER, resolveRequestId } from '@/lib/server/request-id';
 import {
   attributionForOwner,
   runWithUsageAttribution,
@@ -20,10 +21,36 @@ export interface RequestOwnerIdentity {
 export interface RequestOwnerOptions {
   /** Permit a handler's explicit, read-only public resource policy for guests. */
   allowAnonymousPublicRead?: (req: Pick<Request, 'headers' | 'method' | 'url'>) => boolean;
+  /**
+   * Reuse a correlation id already minted by the caller's logging context so a
+   * failure log line and its response always agree. When omitted, the boundary
+   * adopts the request's `x-request-id` or mints a UUID.
+   */
+  requestId?: string;
 }
 
-/** Resolve an application identity in OIDC mode and preserve anonymous owners in legacy mode. */
+/**
+ * Resolve an application identity in OIDC mode and preserve anonymous owners in
+ * legacy mode, stamping the correlation id on every exit — admitted or rejected.
+ */
 export async function resolveRequestOwnerIdForRequest(
+  req: Pick<Request, 'headers' | 'method' | 'url'>,
+  options?: RequestOwnerOptions,
+): Promise<RequestOwnerResolution> {
+  const requestId = options?.requestId ?? resolveRequestId(req.headers);
+  const resolution = await resolveOwnerIdForRequestInner(req, options);
+  // Every exit of the owner boundary echoes `x-request-id` — including the
+  // 401/403/503 gate rejections that never reach a handler — so a client can
+  // always pair a failure with its server log line.
+  if ('response' in resolution) {
+    resolution.response.headers.set(REQUEST_ID_HEADER, requestId);
+    return resolution;
+  }
+  resolution.responseHeaders.set(REQUEST_ID_HEADER, requestId);
+  return resolution;
+}
+
+async function resolveOwnerIdForRequestInner(
   req: Pick<Request, 'headers' | 'method' | 'url'>,
   options?: RequestOwnerOptions,
 ): Promise<RequestOwnerResolution> {
@@ -133,7 +160,8 @@ export async function withRequestOwnerId(
   ) => Promise<Response>,
   options?: RequestOwnerOptions,
 ): Promise<Response> {
-  const resolution = await resolveRequestOwnerIdForRequest(req, options);
+  const requestId = options?.requestId ?? resolveRequestId(req.headers);
+  const resolution = await resolveRequestOwnerIdForRequest(req, { ...options, requestId });
   if ('response' in resolution) return resolution.response;
   const attribution: UsageAttribution = resolution.tenantId
     ? { ownerId: resolution.ownerId, tenantId: resolution.tenantId }
@@ -146,7 +174,7 @@ export async function withRequestOwnerId(
       }),
     );
   } catch (error) {
-    console.error('[agent-runtime] owner-scoped request failed', error);
+    console.error(`[agent-runtime] owner-scoped request failed (requestId=${requestId})`, error);
     return new Response('Internal Server Error', {
       status: 500,
       headers: resolution.responseHeaders,

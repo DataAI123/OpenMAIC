@@ -174,9 +174,27 @@ describe('POST /api/verify-video-provider OIDC OpenRouter slice', () => {
 
   it('retains the legacy path outside OIDC mode', async () => {
     mocks.resolveAuthConfig.mockReturnValue({ mode: 'legacy' });
-    const response = await post({ 'x-video-provider': 'openrouter-video' });
+    const response = await post({
+      'x-video-provider': 'openrouter-video',
+      'x-request-id': 'video-legacy-probe',
+    });
     expect(response.status).toBe(200);
+    expect(response.headers.get('x-request-id')).toBe('video-legacy-probe');
     expect(mocks.legacyConnectivity).toHaveBeenCalledOnce();
     expect(mocks.consumeVideoProviderVerificationRateLimit).not.toHaveBeenCalled();
+  });
+
+  it('returns a correlated sanitized error when auth configuration is unavailable', async () => {
+    mocks.resolveAuthConfig.mockImplementation(() => {
+      throw new Error('private configuration details');
+    });
+
+    const response = await post({ 'x-request-id': 'video-auth-config-failure' });
+
+    expect(response.status).toBe(503);
+    expect(response.headers.get('x-request-id')).toBe('video-auth-config-failure');
+    const body = await response.text();
+    expect(body).toContain('INTERNAL_ERROR');
+    expect(body).not.toContain('private configuration details');
   });
 });

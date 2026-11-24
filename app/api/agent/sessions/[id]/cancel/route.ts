@@ -10,12 +10,13 @@ import { NextResponse } from 'next/server';
 import { isAgentRuntimeConfigured } from '@/lib/config/feature-flags';
 import { getAgentSessionStore } from '@/lib/server/agent-runtime/store';
 import { withRequestOwnerId } from '@/lib/server/agent-runtime/with-owner';
+import { stampRequestId } from '@/lib/server/request-id';
 
 export const runtime = 'nodejs';
 
 export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   if (!isAgentRuntimeConfigured()) {
-    return new Response('Not found', { status: 404 });
+    return stampRequestId(new Response('Not found', { status: 404 }), req.headers);
   }
 
   return withRequestOwnerId(req, async (ownerId, responseHeaders, identity) => {

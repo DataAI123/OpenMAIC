@@ -13,6 +13,7 @@
  */
 
 export const LOGIN_REQUIRED_ERROR_CODE = 'LOGIN_REQUIRED';
+export const TENANT_REQUIRED_ERROR_CODE = 'TENANT_REQUIRED';
 export const AUTH_UNAVAILABLE_ERROR_CODE = 'AUTH_UNAVAILABLE';
 
 export const LOGIN_PATH = '/api/auth/login';
@@ -33,6 +34,11 @@ export function isLoginRequiredFailure(status: number, errorCode?: string | null
   return status === 401 && errorCode === LOGIN_REQUIRED_ERROR_CODE;
 }
 
+/** True for a valid session that must choose a tenant before tenant-scoped work. */
+export function isTenantRequiredFailure(status: number, errorCode?: string | null): boolean {
+  return status === 403 && errorCode === TENANT_REQUIRED_ERROR_CODE;
+}
+
 /**
  * True for the thrown form of the same signal. Client seams that cannot carry
  * an HTTP status (`getLearnerKey`, the workspace Server Action) reject with
@@ -43,8 +49,33 @@ export function isLoginRequiredError(error: unknown): boolean {
   return error instanceof Error && error.message === LOGIN_REQUIRED_ERROR_CODE;
 }
 
+export function isTenantRequiredError(error: unknown): boolean {
+  return error instanceof Error && error.message === TENANT_REQUIRED_ERROR_CODE;
+}
+
 export function isAuthUnavailableError(error: unknown): boolean {
   return error instanceof Error && error.message === AUTH_UNAVAILABLE_ERROR_CODE;
+}
+
+/** Route exact auth failures from an API response through the shared recovery path. */
+export async function recoverClientAuthFailure(response: Response): Promise<boolean> {
+  let errorCode: string | null = null;
+  try {
+    const body = (await response.clone().json()) as { errorCode?: unknown };
+    if (typeof body.errorCode === 'string') errorCode = body.errorCode;
+  } catch {
+    // Malformed or non-JSON failures are handled by the caller as ordinary errors.
+  }
+
+  if (isLoginRequiredFailure(response.status, errorCode)) {
+    redirectToLogin();
+    return true;
+  }
+  if (isTenantRequiredFailure(response.status, errorCode)) {
+    refreshTenantSelection();
+    return true;
+  }
+  return false;
 }
 
 /**
@@ -109,4 +140,10 @@ export function redirectToLogin(currentHref?: string): void {
   const href =
     currentHref ?? `${window.location.pathname}${window.location.search}${window.location.hash}`;
   window.location.assign(loginHref(href));
+}
+
+/** Refresh session state so the global tenant selection gate can take over. */
+export function refreshTenantSelection(): void {
+  if (typeof window === 'undefined') return;
+  window.location.reload();
 }

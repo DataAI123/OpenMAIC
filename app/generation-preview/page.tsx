@@ -18,6 +18,7 @@ import {
 } from '@/lib/audio/voice-resolver';
 import { isQwenCloneVoice, resolveTTSModelForVoice } from '@/lib/audio/constants';
 import { isTTSProviderEnabled } from '@/lib/audio/provider-enablement';
+import { isPDFProviderId } from '@/lib/pdf/constants';
 import { useAllVoiceProfiles } from '@/lib/audio/voxcpm-voices';
 import { useI18n } from '@/lib/hooks/use-i18n';
 import {
@@ -26,6 +27,8 @@ import {
   generateTTSForScene,
 } from '@/lib/hooks/use-scene-generator';
 import { isAbortError } from '@openmaic/generation/browser';
+import { classifyGenerationFailure } from '@/lib/generation/client-failure';
+import { sanitizeGenerationSession } from '@/lib/generation/safe-session';
 import { FOREGROUND_SCENE_RETRY_OPTIONS } from './foreground-retry';
 import {
   loadImageMapping,
@@ -96,6 +99,8 @@ type SceneGenerationFailure = {
   error?: string;
   errorCode?: string;
   statusCode?: number;
+  retryAfterSeconds?: number;
+  requestId?: string;
 };
 
 function GenerationPreviewContent() {
@@ -114,6 +119,8 @@ function GenerationPreviewContent() {
   const [session, setSession] = useState<GenerationSessionState | null>(null);
   const [sessionLoaded, setSessionLoaded] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [failureRequestId, setFailureRequestId] = useState<string | null>(null);
+  const [failureRequestIdCopied, setFailureRequestIdCopied] = useState(false);
   const [currentStepIndex, setCurrentStepIndex] = useState(0);
   const [isComplete] = useState(false);
   const [statusMessage, setStatusMessage] = useState('');
@@ -146,19 +153,23 @@ function GenerationPreviewContent() {
   const isReviewingOutlines = session?.previewPhase === 'review';
 
   const sceneGenerationErrorMessage = (failure: SceneGenerationFailure): string => {
-    if (
-      failure.errorCode === 'MISSING_API_KEY' ||
-      failure.statusCode === 401 ||
-      failure.statusCode === 403
-    ) {
-      return t('generation.sceneGenerateAuthFailed');
-    }
-
-    if (failure.errorCode === 'RATE_LIMITED' || failure.statusCode === 429) {
+    const category = classifyGenerationFailure(failure);
+    if (category === 'login-required') return t('generation.authSessionRequired');
+    if (category === 'tenant-required') return t('generation.tenantSelectionRequired');
+    if (category === 'permission-denied') return t('generation.permissionDenied');
+    if (category === 'auth-unavailable') return t('auth.unavailable');
+    if (category === 'provider-auth-failed') return t('generation.sceneGenerateAuthFailed');
+    if (category === 'rate-limited') {
+      if (failure.retryAfterSeconds && failure.retryAfterSeconds > 0) {
+        return t('generation.sceneGenerateRateLimitedRetryAfter', {
+          seconds: failure.retryAfterSeconds,
+        });
+      }
       return t('generation.sceneGenerateRateLimited');
     }
-
-    if (failure.errorCode === 'UPSTREAM_ERROR' && failure.statusCode && failure.statusCode >= 500) {
+    if (category === 'quota-exceeded') return t('generation.quotaExceeded');
+    if (category === 'internal-error') return t('generation.sceneGenerateFailed');
+    if (category === 'provider-unavailable') {
       return t('generation.sceneGenerateProviderUnavailable');
     }
 
@@ -174,8 +185,9 @@ function GenerationPreviewContent() {
   };
 
   const persistSession = (nextSession: GenerationSessionState) => {
-    setSession(nextSession);
-    sessionStorage.setItem('generationSession', JSON.stringify(nextSession));
+    const safeSession = sanitizeGenerationSession(nextSession);
+    setSession(safeSession);
+    sessionStorage.setItem('generationSession', JSON.stringify(safeSession));
   };
 
   const clearOutlineReviewTimer = () => {
@@ -223,7 +235,9 @@ function GenerationPreviewContent() {
     const saved = sessionStorage.getItem('generationSession');
     if (saved) {
       try {
-        const parsed = JSON.parse(saved) as GenerationSessionState;
+        const parsed = sanitizeGenerationSession(JSON.parse(saved) as GenerationSessionState);
+        // Rewrite legacy snapshots immediately so removed credentials do not remain stored.
+        sessionStorage.setItem('generationSession', JSON.stringify(parsed));
         if (!parsed.previewPhase) {
           parsed.previewPhase = parsed.sceneOutlines?.length ? 'outline-ready' : 'preparing';
         }
@@ -317,6 +331,8 @@ function GenerationPreviewContent() {
     let currentSession = generationSession;
 
     setError(null);
+    setFailureRequestId(null);
+    setFailureRequestIdCopied(false);
     setCurrentStepIndex(0);
 
     try {
@@ -340,17 +356,10 @@ function GenerationPreviewContent() {
         const parsedParts = await Promise.all(
           sortedDocumentSources.map(async (source): Promise<ParsedDocumentPart> => {
             const providerId = source.providerId || currentSession.pdfProviderId;
-            const legacySourceConfig = (
-              source as SessionDocumentSource & {
-                providerConfig?: {
-                  apiKey?: string;
-                  baseUrl?: string;
-                  accessKeyId?: string;
-                  accessKeySecret?: string;
-                };
-              }
-            ).providerConfig;
-            const providerConfig = currentSession.pdfProviderConfig || legacySourceConfig;
+            const providerConfig =
+              providerId && isPDFProviderId(providerId)
+                ? useSettingsStore.getState().pdfProvidersConfig?.[providerId]
+                : undefined;
             const documentBlob = await loadDocumentBlob(source.storageKey);
             if (!(documentBlob instanceof Blob) || documentBlob.size === 0) {
               throw new Error(t('generation.courseMaterialLoadFailed'));
@@ -443,8 +452,7 @@ function GenerationPreviewContent() {
           imageStorageIds,
           pdfStorageKey: undefined, // Clear so we don't re-parse
         };
-        setSession(updatedSession);
-        sessionStorage.setItem('generationSession', JSON.stringify(updatedSession));
+        persistSession(updatedSession);
 
         // Truncation warnings
         const warnings: string[] = [];
@@ -511,8 +519,7 @@ function GenerationPreviewContent() {
           researchContext: searchData.context || '',
           researchSources: sources,
         };
-        setSession(updatedSessionWithSearch);
-        sessionStorage.setItem('generationSession', JSON.stringify(updatedSessionWithSearch));
+        persistSession(updatedSessionWithSearch);
         currentSession = updatedSessionWithSearch;
         activeSteps = getActiveSteps(currentSession);
       }
@@ -983,6 +990,7 @@ function GenerationPreviewContent() {
       );
 
       if (!contentData.success || !contentData.content) {
+        setFailureRequestId(contentData.requestId ?? null);
         throw new Error(sceneGenerationErrorMessage(contentData));
       }
 
@@ -1006,6 +1014,7 @@ function GenerationPreviewContent() {
       );
 
       if (!data.success || !data.scene) {
+        setFailureRequestId(data.requestId ?? null);
         throw new Error(sceneGenerationErrorMessage(data));
       }
       const firstScene = data.scene;
@@ -1282,6 +1291,28 @@ function GenerationPreviewContent() {
             {error && (
               <div className="mx-auto max-w-2xl rounded-md border border-red-500/20 bg-red-500/10 px-4 py-3 text-sm text-red-600 dark:text-red-300">
                 {error}
+                {failureRequestId && (
+                  <div className="mt-2 flex flex-wrap items-center justify-center gap-2 text-xs">
+                    <span>{t('generation.failureReference', { id: failureRequestId })}</span>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={async () => {
+                        try {
+                          await navigator.clipboard.writeText(failureRequestId);
+                          setFailureRequestIdCopied(true);
+                        } catch (copyError) {
+                          log.warn('Could not copy generation request id', copyError);
+                        }
+                      }}
+                    >
+                      {failureRequestIdCopied
+                        ? t('generation.failureReferenceCopied')
+                        : t('common.copy')}
+                    </Button>
+                  </div>
+                )}
               </div>
             )}
 

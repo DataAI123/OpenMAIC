@@ -16,6 +16,7 @@ import {
   validateUrlForSSRFWithPolicy,
 } from '@/lib/server/ssrf-guard';
 import { MINERU_CLOUD_DEFAULT_BASE } from '@/lib/pdf/constants';
+import { REQUEST_ID_HEADER, resolveRequestId } from '@/lib/server/request-id';
 import {
   consumePdfProviderVerificationRateLimit,
   UserApiRateLimitExceededError,
@@ -120,61 +121,27 @@ async function validateAliDocMindEndpoint(url: URL, allowLocalNetworks: boolean)
   return result === null;
 }
 
-async function oidcPost(req: NextRequest): Promise<Response> {
-  return withRequestOwnerId(req, async (ownerId, responseHeaders) => {
-    responseHeaders.set('Cache-Control', 'private, no-store');
-    if (!ownerId.startsWith('user:') || ownerId.length === 'user:'.length) {
-      return ownerApiError('UNAUTHENTICATED', 401, 'Login is required', responseHeaders);
-    }
-
-    try {
-      await consumePdfProviderVerificationRateLimit(ownerId);
-    } catch (error) {
-      if (error instanceof UserApiRateLimitExceededError) {
-        responseHeaders.set('Retry-After', String(error.retryAfterSeconds));
-        return ownerApiError(
-          'RATE_LIMITED',
-          429,
-          'Too many PDF verification requests',
-          responseHeaders,
-        );
+async function oidcPost(req: NextRequest, requestId: string): Promise<Response> {
+  return withRequestOwnerId(
+    req,
+    async (ownerId, responseHeaders) => {
+      responseHeaders.set('Cache-Control', 'private, no-store');
+      if (!ownerId.startsWith('user:') || ownerId.length === 'user:'.length) {
+        return ownerApiError('UNAUTHENTICATED', 401, 'Login is required', responseHeaders);
       }
-      return ownerApiError(
-        'INTERNAL_ERROR',
-        503,
-        'PDF verification is unavailable',
-        responseHeaders,
-      );
-    }
 
-    let body: unknown;
-    try {
-      body = await readJsonBody(req);
-    } catch (error) {
-      return ownerApiError(
-        'INVALID_REQUEST',
-        error instanceof RequestBodyTooLargeError ? 413 : 400,
-        error instanceof RequestBodyTooLargeError
-          ? 'Request body is too large'
-          : 'Invalid PDF verification request',
-        responseHeaders,
-      );
-    }
-
-    const request = parseOidcAliDocMindRequest(body);
-    if (!request) {
-      return ownerApiError(
-        'INTERNAL_ERROR',
-        503,
-        'PDF verification is unavailable for this provider',
-        responseHeaders,
-      );
-    }
-
-    try {
-      const managed = isServerConfiguredProvider('pdf', 'alidocmind');
-      const serverCredentials = managed ? resolveManagedAliDocMindCredentials() : undefined;
-      if (managed && !serverCredentials) {
+      try {
+        await consumePdfProviderVerificationRateLimit(ownerId);
+      } catch (error) {
+        if (error instanceof UserApiRateLimitExceededError) {
+          responseHeaders.set('Retry-After', String(error.retryAfterSeconds));
+          return ownerApiError(
+            'RATE_LIMITED',
+            429,
+            'Too many PDF verification requests',
+            responseHeaders,
+          );
+        }
         return ownerApiError(
           'INTERNAL_ERROR',
           503,
@@ -182,68 +149,105 @@ async function oidcPost(req: NextRequest): Promise<Response> {
           responseHeaders,
         );
       }
-      if (!managed && (!request.accessKeyId || !request.accessKeySecret)) {
+
+      let body: unknown;
+      try {
+        body = await readJsonBody(req);
+      } catch (error) {
         return ownerApiError(
-          'MISSING_REQUIRED_FIELD',
-          400,
-          'AliDocMind access credentials are required',
+          'INVALID_REQUEST',
+          error instanceof RequestBodyTooLargeError ? 413 : 400,
+          error instanceof RequestBodyTooLargeError
+            ? 'Request body is too large'
+            : 'Invalid PDF verification request',
           responseHeaders,
         );
       }
 
-      const allowLocalNetworks = managed && allowLocalNetworksEnabled();
-      const configuredEndpoint = managed ? serverCredentials?.baseUrl : request.endpoint;
-      const endpoint = configuredEndpoint
-        ? normalizeAliDocMindEndpoint(configuredEndpoint, managed)
-        : new URL('https://docmind-api.cn-hangzhou.aliyuncs.com');
-      if (!endpoint) {
-        return ownerApiError('INVALID_URL', 400, 'AliDocMind endpoint is invalid', responseHeaders);
-      }
-      if (!(await validateAliDocMindEndpoint(endpoint, allowLocalNetworks))) {
+      const request = parseOidcAliDocMindRequest(body);
+      if (!request) {
         return ownerApiError(
-          'INVALID_URL',
-          403,
-          'AliDocMind endpoint is not allowed',
+          'INTERNAL_ERROR',
+          503,
+          'PDF verification is unavailable for this provider',
           responseHeaders,
         );
       }
 
-      const { verifyAliDocMindCredentials } = await import('@/lib/pdf/alidocmind-client');
-      const result = await verifyAliDocMindCredentials(
-        {
-          accessKeyId: serverCredentials?.accessKeyId ?? request.accessKeyId,
-          accessKeySecret: serverCredentials?.accessKeySecret ?? request.accessKeySecret,
-          endpoint: endpoint.host,
-        },
-        { allowLocalNetworks, allowCustomPort: managed },
-      );
-      if (!result.ok) {
+      try {
+        const managed = isServerConfiguredProvider('pdf', 'alidocmind');
+        const serverCredentials = managed ? resolveManagedAliDocMindCredentials() : undefined;
+        if (managed && !serverCredentials) {
+          return ownerApiError(
+            'INTERNAL_ERROR',
+            503,
+            'PDF verification is unavailable',
+            responseHeaders,
+          );
+        }
+        if (!managed && (!request.accessKeyId || !request.accessKeySecret)) {
+          return ownerApiError(
+            'MISSING_REQUIRED_FIELD',
+            400,
+            'AliDocMind access credentials are required',
+            responseHeaders,
+          );
+        }
+
+        const allowLocalNetworks = managed && allowLocalNetworksEnabled();
+        const configuredEndpoint = managed ? serverCredentials?.baseUrl : request.endpoint;
+        const endpoint = configuredEndpoint
+          ? normalizeAliDocMindEndpoint(configuredEndpoint, managed)
+          : new URL('https://docmind-api.cn-hangzhou.aliyuncs.com');
+        if (!endpoint) {
+          return ownerApiError(
+            'INVALID_URL',
+            400,
+            'AliDocMind endpoint is invalid',
+            responseHeaders,
+          );
+        }
+        if (!(await validateAliDocMindEndpoint(endpoint, allowLocalNetworks))) {
+          return ownerApiError(
+            'INVALID_URL',
+            403,
+            'AliDocMind endpoint is not allowed',
+            responseHeaders,
+          );
+        }
+
+        const { verifyAliDocMindCredentials } = await import('@/lib/pdf/alidocmind-client');
+        const result = await verifyAliDocMindCredentials(
+          {
+            accessKeyId: serverCredentials?.accessKeyId ?? request.accessKeyId,
+            accessKeySecret: serverCredentials?.accessKeySecret ?? request.accessKeySecret,
+            endpoint: endpoint.host,
+          },
+          { allowLocalNetworks, allowCustomPort: managed },
+        );
+        if (!result.ok) {
+          return ownerApiError(
+            'INVALID_CREDENTIALS',
+            400,
+            'AliDocMind rejected the credentials or the verification request',
+            responseHeaders,
+          );
+        }
+        return ownerJson({ success: true, message: 'Connection successful' }, 200, responseHeaders);
+      } catch {
         return ownerApiError(
-          'INVALID_CREDENTIALS',
-          400,
-          'AliDocMind rejected the credentials or the verification request',
+          'INTERNAL_ERROR',
+          503,
+          'PDF verification is unavailable',
           responseHeaders,
         );
       }
-      return ownerJson({ success: true, message: 'Connection successful' }, 200, responseHeaders);
-    } catch {
-      return ownerApiError(
-        'INTERNAL_ERROR',
-        503,
-        'PDF verification is unavailable',
-        responseHeaders,
-      );
-    }
-  });
+    },
+    { requestId },
+  );
 }
 
-export async function POST(req: NextRequest) {
-  try {
-    if (resolveAuthConfig().mode === 'oidc') return oidcPost(req);
-  } catch {
-    return apiError('INTERNAL_ERROR', 503, 'PDF verification is unavailable');
-  }
-
+async function legacyPost(req: NextRequest, requestId: string): Promise<Response> {
   let providerId: string | undefined;
   try {
     const body = await req.json();
@@ -303,7 +307,11 @@ export async function POST(req: NextRequest) {
         endpoint,
       });
       if (!result.ok) {
-        return apiError('INVALID_CREDENTIALS', 400, `Authentication failed: ${result.error}`);
+        return apiError(
+          'INVALID_CREDENTIALS',
+          400,
+          'Authentication failed: the credentials or verification request were rejected',
+        );
       }
       return apiSuccess({ message: 'Connection successful' });
     }
@@ -344,11 +352,11 @@ export async function POST(req: NextRequest) {
       // Other responses (including 4xx for "batch not found") mean auth + connectivity works.
       // Only network errors, redirects, or 401/403 indicate a problem.
       if (response.status === 401 || response.status === 403) {
-        const text = await response.text().catch(() => '');
+        await response.body?.cancel().catch(() => undefined);
         return apiError(
           'INTERNAL_ERROR',
           500,
-          `Authentication failed: ${text || response.statusText}`,
+          'Authentication failed: the provider rejected the request',
         );
       }
 
@@ -396,7 +404,10 @@ export async function POST(req: NextRequest) {
       status: response.status,
     });
   } catch (error) {
-    log.error(`PDF provider verification failed [provider=${providerId ?? 'unknown'}]:`, error);
+    log.error('PDF provider verification failed', {
+      requestId,
+      errorType: error instanceof Error ? error.name : 'unknown',
+    });
 
     let errorMessage = 'Connection failed';
     if (error instanceof Error) {
@@ -407,10 +418,27 @@ export async function POST(req: NextRequest) {
       } else if (error.message.includes('timeout') || error.name === 'TimeoutError') {
         errorMessage = 'Connection timed out';
       } else {
-        errorMessage = error.message;
+        errorMessage = 'Connection failed';
       }
     }
 
     return apiError('INTERNAL_ERROR', 500, errorMessage);
   }
+}
+
+export async function POST(req: NextRequest) {
+  const requestId = resolveRequestId(req.headers);
+  let mode: string;
+  try {
+    mode = resolveAuthConfig().mode;
+  } catch {
+    const response = apiError('INTERNAL_ERROR', 503, 'PDF verification is unavailable');
+    response.headers.set(REQUEST_ID_HEADER, requestId);
+    return response;
+  }
+
+  if (mode === 'oidc') return oidcPost(req, requestId);
+  const response = await legacyPost(req, requestId);
+  response.headers.set(REQUEST_ID_HEADER, requestId);
+  return response;
 }

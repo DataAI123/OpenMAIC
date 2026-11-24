@@ -3,6 +3,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { isAgentRuntimeConfigured, isProWorkbenchEnabled } from '@/lib/config/feature-flags';
 import { verifyAccessTokenEdge } from '@/lib/server/access-token-edge';
 import { hasValidApplicationSessionToken } from '@/lib/server/auth/session-edge';
+import { REQUEST_ID_HEADER, resolveRequestId } from '@/lib/server/request-id';
 
 function isOwnerScopedOidcApi(pathname: string, method: string): boolean {
   const verb = method.toUpperCase();
@@ -253,7 +254,10 @@ export async function middleware(request: NextRequest) {
   const workbenchEnabled =
     isProWorkbenchEnabled() && (!canInspectServerRuntime || isAgentRuntimeConfigured());
   if (!workbenchEnabled && (pathname === '/workbench' || pathname.startsWith('/workbench/'))) {
-    return new NextResponse('Not found', { status: 404 });
+    return new NextResponse('Not found', {
+      status: 404,
+      headers: { [REQUEST_ID_HEADER]: resolveRequestId(request.headers) },
+    });
   }
 
   // OIDC business routes are admitted only when their handler policy has been
@@ -262,7 +266,17 @@ export async function middleware(request: NextRequest) {
   // only a valid signed application session. This edge check keeps all other
   // routes closed.
   if (process.env.OPENMAIC_AUTH_MODE?.trim() === 'oidc') {
-    if (pathname === '/api/health' || isOidcAuthApi(pathname, request.method)) {
+    // Edge rejections (and the route-not-enabled 503) never reach a handler, so
+    // middleware stamps the correlation id itself: a client can still pair the
+    // failure with a server log line.
+    const requestId = resolveRequestId(request.headers);
+    if (
+      pathname === '/api/health' ||
+      (pathname === '/api/health/live' && ['GET', 'HEAD'].includes(request.method.toUpperCase())) ||
+      (pathname === '/api/health/ready' &&
+        ['GET', 'HEAD'].includes(request.method.toUpperCase())) ||
+      isOidcAuthApi(pathname, request.method)
+    ) {
       return NextResponse.next();
     }
     if (pathname.startsWith('/api/')) {
@@ -273,14 +287,14 @@ export async function middleware(request: NextRequest) {
       ) {
         return new NextResponse('Enterprise authorization is not enabled for this route.', {
           status: 503,
-          headers: { 'Cache-Control': 'no-store' },
+          headers: { 'Cache-Control': 'no-store', [REQUEST_ID_HEADER]: requestId },
         });
       }
       if (!(await hasValidApplicationSessionToken(request.headers))) {
         if (isAnonymousPublicReadApi(pathname, request.method)) return NextResponse.next();
         return NextResponse.json(
           { success: false, errorCode: 'LOGIN_REQUIRED', error: 'login_required' },
-          { status: 401, headers: { 'Cache-Control': 'no-store' } },
+          { status: 401, headers: { 'Cache-Control': 'no-store', [REQUEST_ID_HEADER]: requestId } },
         );
       }
       return NextResponse.next();
@@ -290,7 +304,9 @@ export async function middleware(request: NextRequest) {
       loginUrl.pathname = '/api/auth/login';
       loginUrl.search = '';
       loginUrl.searchParams.set('returnTo', `${pathname}${request.nextUrl.search}`);
-      return NextResponse.redirect(loginUrl);
+      return NextResponse.redirect(loginUrl, {
+        headers: { [REQUEST_ID_HEADER]: requestId },
+      });
     }
     return NextResponse.next();
   }
@@ -301,7 +317,12 @@ export async function middleware(request: NextRequest) {
   }
 
   // Whitelist: access-code endpoints, health check
-  if (pathname.startsWith('/api/access-code/') || pathname === '/api/health') {
+  if (
+    pathname.startsWith('/api/access-code/') ||
+    pathname === '/api/health' ||
+    (pathname === '/api/health/live' && ['GET', 'HEAD'].includes(request.method.toUpperCase())) ||
+    (pathname === '/api/health/ready' && ['GET', 'HEAD'].includes(request.method.toUpperCase()))
+  ) {
     return NextResponse.next();
   }
 
@@ -315,7 +336,10 @@ export async function middleware(request: NextRequest) {
   if (pathname.startsWith('/api/')) {
     return NextResponse.json(
       { success: false, errorCode: 'INVALID_REQUEST', error: 'Access code required' },
-      { status: 401 },
+      {
+        status: 401,
+        headers: { [REQUEST_ID_HEADER]: resolveRequestId(request.headers) },
+      },
     );
   }
 

@@ -2,10 +2,11 @@ import { NextRequest, NextResponse } from 'next/server';
 
 import { resolveAuthConfig } from '@/lib/server/auth/config';
 import { clearedSessionCookieHeader, resolveApplicationSession } from '@/lib/server/auth/session';
+import { stampRequestId } from '@/lib/server/request-id';
 
 export const runtime = 'nodejs';
 
-export async function POST(request: NextRequest): Promise<NextResponse> {
+async function handlePost(request: NextRequest): Promise<NextResponse> {
   let config;
   try {
     config = resolveAuthConfig();
@@ -63,4 +64,19 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       'Set-Cookie': clearedSessionCookieHeader(),
     },
   });
+}
+
+export async function POST(request: NextRequest): Promise<NextResponse> {
+  try {
+    return stampRequestId(await handlePost(request), request.headers);
+  } catch (error) {
+    console.error('[auth] logout route failed', error instanceof Error ? error.name : 'unknown');
+    return stampRequestId(
+      NextResponse.json(
+        { success: false, errorCode: 'AUTH_UNAVAILABLE' },
+        { status: 503, headers: { 'Cache-Control': 'no-store' } },
+      ),
+      request.headers,
+    );
+  }
 }

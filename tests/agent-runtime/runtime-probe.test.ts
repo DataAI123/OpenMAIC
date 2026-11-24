@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { NextRequest } from 'next/server';
 
 // No feature-flags mock: the probe reads the REAL environment, so each row
 // below exercises the actual `isAgentRuntimeConfigured()` /
@@ -42,7 +43,13 @@ describe('agent runtime probe', () => {
       // actually serve a request. `runtimeEnabled` is the raw intent flag, so
       // "off by choice" (false/false) is distinguishable from "on but
       // unusable" (false/true).
-      await expect((await GET()).json()).resolves.toEqual({ enabled, runtimeEnabled });
+      const response = await GET(
+        new NextRequest('http://localhost/api/agent/runtime', {
+          headers: { 'x-request-id': 'runtime-probe' },
+        }),
+      );
+      expect(response.headers.get('x-request-id')).toBe('runtime-probe');
+      await expect(response.json()).resolves.toEqual({ enabled, runtimeEnabled });
     },
   );
 });

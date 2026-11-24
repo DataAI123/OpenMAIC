@@ -7,10 +7,8 @@
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import {
-  generateWithOpenRouterImage,
-  openRouterBaseUrl,
-} from '@/lib/media/adapters/openrouter-image-adapter';
+import { openRouterBaseUrl } from '@/lib/media/constants';
+import { generateWithOpenRouterImage } from '@/lib/media/adapters/openrouter-image-adapter';
 import { generateWithOpenRouterVideo } from '@/lib/media/adapters/openrouter-video-adapter';
 
 afterEach(() => {

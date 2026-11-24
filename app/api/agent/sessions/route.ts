@@ -21,6 +21,7 @@ import { withRequestOwnerId } from '@/lib/server/agent-runtime/with-owner';
 import { buildRequestOrigin, isValidClassroomId } from '@/lib/server/classroom-storage';
 import { resolveStageAccess } from '@/lib/server/stage-access';
 import { decodeCourseRefs } from '@/lib/workbench/course-refs';
+import { stampRequestId } from '@/lib/server/request-id';
 
 export const runtime = 'nodejs';
 
@@ -38,7 +39,7 @@ interface CreateSessionBody {
 
 export async function POST(req: NextRequest) {
   if (!isAgentRuntimeConfigured()) {
-    return new Response('Not found', { status: 404 });
+    return stampRequestId(new Response('Not found', { status: 404 }), req.headers);
   }
 
   let body: CreateSessionBody = {};
@@ -197,7 +198,7 @@ export async function POST(req: NextRequest) {
 
 export async function GET(req: NextRequest) {
   if (!isAgentRuntimeConfigured()) {
-    return new Response('Not found', { status: 404 });
+    return stampRequestId(new Response('Not found', { status: 404 }), req.headers);
   }
 
   return withRequestOwnerId(req, async (ownerId, responseHeaders, identity) => {

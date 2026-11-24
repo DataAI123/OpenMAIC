@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { VIDEO_PROVIDERS, normalizeVideoOptions } from '@/lib/media/video-providers';
+import { VIDEO_PROVIDERS } from '@/lib/media/constants';
+import { normalizeVideoOptions } from '@/lib/media/video-providers';
 import { generateWithMiniMaxVideo } from '@/lib/media/adapters/minimax-video-adapter';
 
 describe('MiniMax video provider', () => {

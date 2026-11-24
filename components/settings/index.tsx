@@ -43,10 +43,9 @@ import { PDFSettings } from './pdf-settings';
 import { PDF_PROVIDERS } from '@/lib/pdf/constants';
 import type { PDFProviderId } from '@/lib/pdf/types';
 import { ImageSettings } from './image-settings';
-import { IMAGE_PROVIDERS } from '@/lib/media/image-providers';
+import { IMAGE_PROVIDERS, VIDEO_PROVIDERS } from '@/lib/media/constants';
 import type { ImageProviderId } from '@/lib/media/types';
 import { VideoSettings } from './video-settings';
-import { VIDEO_PROVIDERS } from '@/lib/media/video-providers';
 import type { VideoProviderId } from '@/lib/media/types';
 import { TTSSettings } from './tts-settings';
 import { TTS_PROVIDERS } from '@/lib/audio/constants';
@@ -1080,7 +1079,12 @@ export function SettingsDialog({ open, onOpenChange, initialSection }: SettingsD
                       <Trash2 className="h-4 w-4" />
                     </Button>
                   )}
-                <Button variant="ghost" size="icon" onClick={() => onOpenChange(false)}>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  aria-label={t('common.close')}
+                  onClick={() => onOpenChange(false)}
+                >
                   <X className="h-4 w-4" />
                 </Button>
               </div>

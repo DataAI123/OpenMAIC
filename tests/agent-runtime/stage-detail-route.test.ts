@@ -44,6 +44,12 @@ function jsonInit(method: string, body: unknown): NextInit {
   };
 }
 
+function withRequestId(init: NextInit | undefined, requestId: string): NextInit {
+  const headers = new Headers(init?.headers);
+  headers.set('x-request-id', requestId);
+  return { ...init, headers };
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.runtimeConfigured = true;
@@ -75,7 +81,11 @@ describe('GET /api/stages/[id]', () => {
 
   it('answers 404 when the agent runtime is not configured', async () => {
     mocks.runtimeConfigured = false;
-    expect((await call(GET)).status).toBe(404);
+    const response = await call(GET, {
+      headers: { 'x-request-id': 'stage-detail-runtime-disabled' },
+    });
+    expect(response.status).toBe(404);
+    expect(response.headers.get('x-request-id')).toBe('stage-detail-runtime-disabled');
   });
 });
 
@@ -106,8 +116,9 @@ describe('PATCH /api/stages/[id]', () => {
     ['empty name', jsonInit('PATCH', { name: '   ' })],
     ['missing name', jsonInit('PATCH', {})],
   ])('rejects %s with 400', async (_label, init) => {
-    const response = await call(PATCH, init);
+    const response = await call(PATCH, withRequestId(init, 'stage-patch-invalid'));
     expect(response.status).toBe(400);
+    expect(response.headers.get('x-request-id')).toBe('stage-patch-invalid');
     expect(mocks.fakeStore!.saveCalls).toHaveLength(0);
   });
 
@@ -190,8 +201,9 @@ describe('PUT /api/stages/[id]', () => {
     ['missing scenes', { stage: { id: STAGE_ID } }],
     ['non-string stage id', { stage: { id: 7 }, scenes: [] }],
   ])('rejects %s with 400', async (_label, body) => {
-    const response = await call(PUT, jsonInit('PUT', body));
+    const response = await call(PUT, withRequestId(jsonInit('PUT', body), 'stage-put-invalid'));
     expect(response.status).toBe(400);
+    expect(response.headers.get('x-request-id')).toBe('stage-put-invalid');
     expect(mocks.fakeStore!.saveCalls).toHaveLength(0);
   });
 

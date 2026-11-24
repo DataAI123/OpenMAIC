@@ -130,8 +130,9 @@ describe('tenant administration routes', () => {
 
   it('requires login and clears a malformed session cookie', async () => {
     mocks.resolveApplicationSession.mockResolvedValueOnce({ status: 'missing' });
-    const missing = await listMembers();
+    const missing = await listMembers({ 'x-request-id': 'tenant-api-check:missing' });
     expect(missing.status).toBe(401);
+    expect(missing.headers.get('x-request-id')).toBe('tenant-api-check:missing');
     expect(await missing.json()).toEqual({
       success: false,
       errorCode: 'LOGIN_REQUIRED',
@@ -189,8 +190,9 @@ describe('tenant administration routes', () => {
         createdAt: 'x',
       },
     ]);
-    const response = await listMembers();
+    const response = await listMembers({ 'x-request-id': 'tenant-api-check:success' });
     expect(response.status).toBe(200);
+    expect(response.headers.get('x-request-id')).toBe('tenant-api-check:success');
     expect(response.headers.get('cache-control')).toBe('private, no-store');
     expect(await response.json()).toEqual({
       success: true,

@@ -28,6 +28,7 @@ import { isAgentRuntimeConfigured } from '@/lib/config/feature-flags';
 import { resolveRequestOwnerIdForRequest } from '@/lib/server/agent-runtime/with-owner';
 import { getOwnerScopedDocumentStore } from '@/lib/server/agent-runtime/owner-scoped-documents';
 import { ownerNotFound } from '@/lib/server/agent-runtime/route-response';
+import { REQUEST_ID_HEADER, resolveRequestId } from '@/lib/server/request-id';
 
 export const runtime = 'nodejs';
 // Self-hosted `next start` ignores maxDuration; Vercel's adapter can still use
@@ -42,20 +43,52 @@ export const STAGE_FRESHNESS_HEARTBEAT_MS = 25_000;
 export const STAGE_FRESHNESS_RETRY_MS = 3_000;
 
 type Params = { params: Promise<{ id: string }> };
+type OwnerDocumentStore = Awaited<ReturnType<typeof getOwnerScopedDocumentStore>>;
 
 export async function GET(req: NextRequest, { params }: Params) {
-  if (!isAgentRuntimeConfigured()) return new Response('Not found', { status: 404 });
+  const requestId = resolveRequestId(req.headers);
+  const requestHeaders = new Headers({ [REQUEST_ID_HEADER]: requestId });
+  if (!isAgentRuntimeConfigured()) {
+    return new Response('Not found', { status: 404, headers: requestHeaders });
+  }
 
-  const ownerResolution = await resolveRequestOwnerIdForRequest(req);
+  let ownerResolution;
+  try {
+    ownerResolution = await resolveRequestOwnerIdForRequest(req, { requestId });
+  } catch (error) {
+    console.error(
+      `[agent-runtime] failed to resolve stage freshness owner (requestId=${requestId})`,
+      error instanceof Error ? error.name : 'unknown',
+    );
+    return Response.json(
+      { success: false, errorCode: 'UPSTREAM_ERROR', error: 'Stage freshness is unavailable' },
+      { status: 503, headers: requestHeaders },
+    );
+  }
   if ('response' in ownerResolution) return ownerResolution.response;
   const { ownerId, tenantId, responseHeaders } = ownerResolution;
-  const { id: stageId } = await params;
+  let stageId: string;
+  let initial: Awaited<ReturnType<OwnerDocumentStore['readFreshnessManifest']>>;
 
   // Existence-gated, exactly like the manifest route: the owner-bound store
   // reads a foreign or missing stage as absent, and the 404 carries the
   // owner cookie the same way every response of this family does.
-  const store = await getOwnerScopedDocumentStore(ownerId, undefined, tenantId);
-  const initial = await store.readFreshnessManifest(stageId);
+  let store: OwnerDocumentStore;
+  try {
+    ({ id: stageId } = await params);
+    store = await getOwnerScopedDocumentStore(ownerId, undefined, tenantId);
+    initial = await store.readFreshnessManifest(stageId);
+  } catch (error) {
+    const resolvedRequestId = responseHeaders.get(REQUEST_ID_HEADER) ?? requestId;
+    console.error(
+      `[agent-runtime] failed to prepare stage freshness stream (requestId=${resolvedRequestId})`,
+      error instanceof Error ? error.name : 'unknown',
+    );
+    return Response.json(
+      { success: false, errorCode: 'UPSTREAM_ERROR', error: 'Stage freshness is unavailable' },
+      { status: 503, headers: responseHeaders },
+    );
+  }
   if (!initial) return ownerNotFound(responseHeaders);
 
   const encoder = new TextEncoder();

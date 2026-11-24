@@ -377,6 +377,7 @@ function schemaFor(names: AgentSessionTableNames): string {
     .replaceAll(`ALTER TABLE ${names.ownerEvents}\n`, `ALTER TABLE ${o}\n`)
     .replaceAll(`REFERENCES ${names.sessions}`, `REFERENCES ${s}`)
     .replaceAll(`ON ${names.sessions}`, `ON ${s}`)
+    .replaceAll(`ON ${names.ownerEvents}`, `ON ${o}`)
     .replaceAll(`ON ${names.entries}`, `ON ${t}`)
     .replaceAll(`CREATE TABLE IF NOT EXISTS ${names.sessions}`, `CREATE TABLE IF NOT EXISTS ${s}`)
     .replaceAll(`CREATE TABLE IF NOT EXISTS ${names.events}`, `CREATE TABLE IF NOT EXISTS ${e}`)

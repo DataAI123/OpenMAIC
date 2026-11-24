@@ -12,14 +12,18 @@
  * DATABASE_URL).
  */
 import { isAgentRuntimeConfigured, isAgentRuntimeEnabled } from '@/lib/config/feature-flags';
+import { stampRequestId } from '@/lib/server/request-id';
 
 export const runtime = 'nodejs';
 
-export async function GET() {
+export async function GET(req: Request) {
   // Intentionally no materials flag: isAgentMaterialsEnabled does not exist in
   // this repo (the materials routes gate on the runtime, like the stages).
-  return Response.json({
-    enabled: isAgentRuntimeConfigured(),
-    runtimeEnabled: isAgentRuntimeEnabled(),
-  });
+  return stampRequestId(
+    Response.json({
+      enabled: isAgentRuntimeConfigured(),
+      runtimeEnabled: isAgentRuntimeEnabled(),
+    }),
+    req.headers,
+  );
 }

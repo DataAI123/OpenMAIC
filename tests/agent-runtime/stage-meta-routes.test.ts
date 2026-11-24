@@ -123,10 +123,38 @@ describe('GET /api/stage-meta/[stageId]', () => {
   it('gates on configured server persistence', async () => {
     mocks.persistenceConfigured = false;
     const response = await getStageMeta(
-      new NextRequest(`http://localhost/api/stage-meta/${STAGE_ID}`),
+      new NextRequest(`http://localhost/api/stage-meta/${STAGE_ID}`, {
+        headers: { 'x-request-id': 'stage-meta-persistence-disabled' },
+      }),
       stageMetaParams(STAGE_ID),
     );
     expect(response.status).toBe(404);
+    expect(response.headers.get('x-request-id')).toBe('stage-meta-persistence-disabled');
+  });
+
+  it('logs only the request id and error type when stage access fails', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const stageAccess = await import('@/lib/server/stage-access');
+    const accessSpy = vi
+      .spyOn(stageAccess, 'resolveStageAccess')
+      .mockRejectedValueOnce(new Error('database password must not be logged'));
+    const response = await getStageMeta(
+      new NextRequest(`http://localhost/api/stage-meta/${STAGE_ID}`, {
+        headers: { 'x-request-id': 'stage-meta-store-failure' },
+      }),
+      stageMetaParams(STAGE_ID),
+    );
+
+    expect(response.status).toBe(500);
+    expect(response.headers.get('x-request-id')).toBe('stage-meta-store-failure');
+    expect(errorSpy).toHaveBeenCalledWith('Failed to resolve stage meta', {
+      requestId: 'stage-meta-store-failure',
+      stageId: STAGE_ID,
+      errorType: 'Error',
+    });
+    expect(JSON.stringify(errorSpy.mock.calls)).not.toContain('database password');
+    accessSpy.mockRestore();
+    errorSpy.mockRestore();
   });
 });
 

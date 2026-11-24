@@ -45,6 +45,7 @@ function runWithOwner(ownerId: string) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mocks.isAgentRuntimeEnabled.mockReturnValue(true);
   runWithOwner('user:u1');
   mocks.listSkills.mockResolvedValue([
     {
@@ -72,6 +73,19 @@ beforeEach(() => {
 });
 
 describe('POST agent skills', () => {
+  it('correlates the runtime-disabled response', async () => {
+    mocks.isAgentRuntimeEnabled.mockReturnValue(false);
+    const response = await POST(
+      new NextRequest('http://localhost/api/agent/skills', {
+        method: 'POST',
+        headers: { 'x-request-id': 'skills-post-off' },
+      }),
+    );
+    expect(response.status).toBe(404);
+    expect(response.headers.get('x-request-id')).toBe('skills-post-off');
+    expect(mocks.withRequestOwnerId).not.toHaveBeenCalled();
+  });
+
   it('uploads the exporter zip and creates it in the request owner partition', async () => {
     const { buildUserSkillZip } = await import('@/lib/server/skill-export');
     const zip = await buildUserSkillZip({
@@ -104,6 +118,18 @@ describe('POST agent skills', () => {
 });
 
 describe('GET agent skills', () => {
+  it('correlates the runtime-disabled response', async () => {
+    mocks.isAgentRuntimeEnabled.mockReturnValue(false);
+    const response = await GET(
+      new NextRequest('http://localhost/api/agent/skills', {
+        headers: { 'x-request-id': 'skills-get-off' },
+      }),
+    );
+    expect(response.status).toBe(404);
+    expect(response.headers.get('x-request-id')).toBe('skills-get-off');
+    expect(mocks.withRequestOwnerId).not.toHaveBeenCalled();
+  });
+
   it('lists builtin and current-owner skills with stable id and readable handle', async () => {
     const response = await GET(request());
     expect(response.status).toBe(200);

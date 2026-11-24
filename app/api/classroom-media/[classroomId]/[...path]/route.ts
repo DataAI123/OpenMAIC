@@ -49,7 +49,12 @@ export async function GET(
 ) {
   return withRequestOwnerId(req, async (ownerId, responseHeaders, identity) => {
     const resolvedIdentity = identity ?? { ownerId };
-    const response = await handleGet(req, context, resolvedIdentity);
+    const response = await handleGet(
+      req,
+      context,
+      resolvedIdentity,
+      responseHeaders.get('x-request-id') ?? '',
+    );
     if (resolvedIdentity.ownerId.startsWith('user:')) {
       response.headers.set('Cache-Control', PRIVATE_CACHE_HEADERS['Cache-Control']);
     }
@@ -62,6 +67,7 @@ async function handleGet(
   req: NextRequest,
   { params }: { params: Promise<{ classroomId: string; path: string[] }> },
   identity: RequestOwnerIdentity,
+  requestId: string,
 ) {
   const { classroomId, path: pathSegments } = await params;
 
@@ -87,7 +93,10 @@ async function handleGet(
     try {
       classroom = await readClassroom(classroomId);
     } catch (error) {
-      log.error(`Classroom ownership lookup failed [classroomId=${classroomId}]:`, error);
+      log.error('Classroom ownership lookup failed', {
+        requestId,
+        errorType: error instanceof Error ? error.name : 'unknown',
+      });
       return NextResponse.json({ error: 'Internal error' }, { status: 500 });
     }
     if (
@@ -163,10 +172,10 @@ async function handleGet(
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
       return NextResponse.json({ error: 'Not found' }, { status: 404 });
     }
-    log.error(
-      `Classroom media serving failed [classroomId=${classroomId}, path=${joined}]:`,
-      error,
-    );
+    log.error('Classroom media serving failed', {
+      requestId,
+      errorType: error instanceof Error ? error.name : 'unknown',
+    });
     return NextResponse.json({ error: 'Internal error' }, { status: 500 });
   }
 }

@@ -12,6 +12,7 @@ import { ServerProvidersInit } from '@/components/server-providers-init';
 import { StorageHealthNotice } from '@/components/storage-health-notice';
 import { AccessCodeGuard } from '@/components/access-code-guard';
 import { AuthSessionNotice } from '@/components/auth-session-notice';
+import { TenantRequiredGate } from '@/components/tenant-required-gate';
 import { ProSwapWatcher } from '@/components/workbench/ProSwapWatcher';
 
 // The UI font is loaded from @fontsource's stylesheet rather than next/font,
@@ -50,6 +51,7 @@ export default function RootLayout({
           <I18nProvider>
             <ServerProvidersInit />
             <AuthSessionNotice />
+            <TenantRequiredGate />
             <ProSwapWatcher />
             <AccessCodeGuard>{children}</AccessCodeGuard>
             <Toaster position="top-center" />

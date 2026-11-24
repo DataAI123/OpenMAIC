@@ -112,8 +112,16 @@ describe('PATCH agent session title', () => {
   it('stays behind the runtime feature gate', async () => {
     mocks.runtimeEnabled = false;
 
-    const response = await patch(JSON.stringify({ title: 'Hidden' }));
+    const response = await PATCH(
+      new NextRequest('http://localhost/api/agent/sessions/session-1', {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json', 'x-request-id': 'session-patch-off' },
+        body: JSON.stringify({ title: 'Hidden' }),
+      }),
+      { params: Promise.resolve({ id: 'session-1' }) },
+    );
     expect(response.status).toBe(404);
+    expect(response.headers.get('x-request-id')).toBe('session-patch-off');
     expect(await response.text()).toBe('Not found');
   });
 

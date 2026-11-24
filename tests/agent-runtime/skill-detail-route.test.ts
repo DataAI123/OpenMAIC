@@ -11,6 +11,7 @@ const mocks = vi.hoisted(() => {
     }
   }
   return {
+    runtimeConfigured: true,
     withRequestOwnerId: vi.fn(),
     findUserSkill: vi.fn(),
     deleteUserSkill: vi.fn(),
@@ -19,7 +20,7 @@ const mocks = vi.hoisted(() => {
 });
 vi.mock('@/lib/config/feature-flags', () => ({
   isAgentRuntimeEnabled: () => true,
-  isAgentRuntimeConfigured: () => true,
+  isAgentRuntimeConfigured: () => mocks.runtimeConfigured,
 }));
 vi.mock('@/lib/server/agent-runtime/with-owner', () => ({
   withRequestOwnerId: mocks.withRequestOwnerId,
@@ -37,6 +38,7 @@ const context = { params: Promise.resolve({ id: 'usk_1' }) };
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mocks.runtimeConfigured = true;
   mocks.withRequestOwnerId.mockImplementation(
     async (
       _req: NextRequest,
@@ -50,6 +52,19 @@ beforeEach(() => {
 });
 
 describe('GET agent skill detail', () => {
+  it('correlates the runtime-disabled response', async () => {
+    mocks.runtimeConfigured = false;
+    const response = await GET(
+      new NextRequest('http://localhost/api/agent/skills/usk_1', {
+        headers: { 'x-request-id': 'skill-get-off' },
+      }),
+      { params: Promise.resolve({ id: 'usk_1' }) },
+    );
+    expect(response.status).toBe(404);
+    expect(response.headers.get('x-request-id')).toBe('skill-get-off');
+    expect(mocks.withRequestOwnerId).not.toHaveBeenCalled();
+  });
+
   it('returns the complete body only for the current owner', async () => {
     const response = await GET(request(), context);
     expect(response.status).toBe(200);

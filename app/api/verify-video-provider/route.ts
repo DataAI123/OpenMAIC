@@ -11,6 +11,7 @@ import type { ProviderKeyProbeResult } from '@/lib/media/provider-key-probe';
 import type { VideoProviderId } from '@/lib/media/types';
 import { createLogger } from '@/lib/logger';
 import { apiError, apiSuccess } from '@/lib/server/api-response';
+import { stampRequestId } from '@/lib/server/request-id';
 import { ownerApiError, ownerJson } from '@/lib/server/agent-runtime/route-response';
 import { withRequestOwnerId } from '@/lib/server/agent-runtime/with-owner';
 import { resolveAuthConfig } from '@/lib/server/auth/config';
@@ -178,5 +179,15 @@ async function legacyPost(request: NextRequest): Promise<Response> {
 }
 
 export async function POST(request: NextRequest): Promise<Response> {
-  return resolveAuthConfig().mode === 'oidc' ? oidcPost(request) : legacyPost(request);
+  let oidcMode: boolean;
+  try {
+    oidcMode = resolveAuthConfig().mode === 'oidc';
+  } catch {
+    return stampRequestId(
+      apiError('INTERNAL_ERROR', 503, 'Video verification is unavailable.'),
+      request.headers,
+    );
+  }
+  if (oidcMode) return oidcPost(request);
+  return stampRequestId(await legacyPost(request), request.headers);
 }

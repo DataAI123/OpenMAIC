@@ -6,6 +6,7 @@ import { NextRequest } from 'next/server';
 // the zip route (which the JSON detail route does not cover) against an
 // existence oracle — a foreign owner and an absent id must answer identically.
 const mocks = vi.hoisted(() => ({
+  runtimeConfigured: true,
   withRequestOwnerId: vi.fn(),
   findUserSkill: vi.fn(),
   buildBuiltinSkillZip: vi.fn(),
@@ -16,7 +17,7 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('@/lib/config/feature-flags', () => ({
   isAgentRuntimeEnabled: () => true,
-  isAgentRuntimeConfigured: () => true,
+  isAgentRuntimeConfigured: () => mocks.runtimeConfigured,
 }));
 vi.mock('@/lib/server/agent-runtime/with-owner', () => ({
   withRequestOwnerId: mocks.withRequestOwnerId,
@@ -33,13 +34,19 @@ vi.mock('@/lib/server/skill-export', () => ({
 
 import { GET } from '@/app/api/skills/[id]/route';
 
-const get = (id: string) =>
-  GET(new NextRequest(`http://localhost/api/skills/${id}`), {
-    params: Promise.resolve({ id }),
-  });
+const get = (id: string, requestId?: string) =>
+  GET(
+    new NextRequest(`http://localhost/api/skills/${id}`, {
+      headers: requestId ? { 'x-request-id': requestId } : undefined,
+    }),
+    {
+      params: Promise.resolve({ id }),
+    },
+  );
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mocks.runtimeConfigured = true;
   mocks.isSafeSkillId.mockReturnValue(true);
   // No built-in matches, so the owner-skill branch is the one under test.
   mocks.buildBuiltinSkillZip.mockResolvedValue(null);
@@ -70,6 +77,27 @@ describe('GET /api/skills/:id (skill zip)', () => {
     expect(mocks.findUserSkill).toHaveBeenCalledWith('usk_1', 'user:u1');
   });
 
+  it('correlates a public built-in zip response', async () => {
+    mocks.buildOpenClawSkillZip.mockResolvedValue(Buffer.from('zipbytes'));
+
+    const response = await get('openmaic', 'builtin-skill-download');
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get('x-request-id')).toBe('builtin-skill-download');
+    expect(response.headers.get('content-type')).toBe('application/zip');
+    expect(mocks.withRequestOwnerId).not.toHaveBeenCalled();
+  });
+
+  it('correlates the runtime gate before owner resolution', async () => {
+    mocks.runtimeConfigured = false;
+
+    const response = await get('openmaic', 'skills-runtime-disabled');
+
+    expect(response.status).toBe(404);
+    expect(response.headers.get('x-request-id')).toBe('skills-runtime-disabled');
+    expect(mocks.withRequestOwnerId).not.toHaveBeenCalled();
+  });
+
   it('answers a foreign owner and an absent id with the identical plain 404', async () => {
     // findUserSkill returns null for "not found" AND "belongs to someone else",
     // so both callers see one indistinguishable response — no existence oracle.
@@ -91,9 +119,10 @@ describe('GET /api/skills/:id (skill zip)', () => {
   it('rejects an unsafe skill id before touching the owner store', async () => {
     mocks.isSafeSkillId.mockReturnValue(false);
 
-    const response = await get('../etc/passwd');
+    const response = await get('../etc/passwd', 'unsafe-skill-id');
 
     expect(response.status).toBe(400);
+    expect(response.headers.get('x-request-id')).toBe('unsafe-skill-id');
     expect(mocks.withRequestOwnerId).not.toHaveBeenCalled();
     expect(mocks.findUserSkill).not.toHaveBeenCalled();
   });

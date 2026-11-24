@@ -588,18 +588,6 @@ function HomePage() {
     const frozenMaterials = [...form.courseMaterials].sort((a, b) => a.order - b.order);
     const settingsSnapshot = useSettingsStore.getState();
     const frozenPdfProviderId = settingsSnapshot.pdfProviderId;
-    const frozenPdfProviderConfig = settingsSnapshot.pdfProvidersConfig?.[
-      settingsSnapshot.pdfProviderId
-    ]
-      ? {
-          apiKey: settingsSnapshot.pdfProvidersConfig[settingsSnapshot.pdfProviderId].apiKey,
-          baseUrl: settingsSnapshot.pdfProvidersConfig[settingsSnapshot.pdfProviderId].baseUrl,
-          accessKeyId:
-            settingsSnapshot.pdfProvidersConfig[settingsSnapshot.pdfProviderId].accessKeyId,
-          accessKeySecret:
-            settingsSnapshot.pdfProvidersConfig[settingsSnapshot.pdfProviderId].accessKeySecret,
-        }
-      : undefined;
 
     // Flip the generating UI state before material bytes are copied locally.
     setPreparingGenerate(true);
@@ -616,15 +604,11 @@ function HomePage() {
 
       let documentSources: SessionDocumentSource[] | undefined;
       let pdfProviderId: string | undefined;
-      let pdfProviderConfig:
-        | { apiKey?: string; baseUrl?: string; accessKeyId?: string; accessKeySecret?: string }
-        | undefined;
 
       if (frozenMaterials.length > 0) {
         // The session is built from the click-time snapshot (frozen above),
         // never from live store state.
         pdfProviderId = frozenPdfProviderId;
-        pdfProviderConfig = frozenPdfProviderConfig;
 
         const storedDocumentKeys: string[] = [];
         try {
@@ -664,7 +648,6 @@ function HomePage() {
         pdfFileName: documentSources?.[0]?.name,
         documentMimeType: documentSources?.[0]?.mimeType,
         pdfProviderId,
-        pdfProviderConfig,
         sceneOutlines: null,
         currentStep: 'generating' as const,
       };
@@ -796,6 +779,7 @@ function HomePage() {
         <div className="relative">
           <button
             onClick={() => setSettingsOpen(true)}
+            aria-label={t('settings.title')}
             className="p-2 rounded-full text-gray-400 dark:text-gray-500 hover:bg-white dark:hover:bg-gray-700 hover:text-gray-800 dark:hover:text-gray-200 hover:shadow-sm transition-all group"
           >
             <Settings className="w-4 h-4 group-hover:rotate-90 transition-transform duration-500" />

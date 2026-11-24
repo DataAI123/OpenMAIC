@@ -1,4 +1,3 @@
-import { randomUUID } from 'node:crypto';
 import type { IncomingMessage, RequestListener, ServerResponse } from 'node:http';
 import { Readable } from 'node:stream';
 
@@ -30,11 +29,11 @@ import { isOwnerReadEnforcementEnabled } from '@/lib/persistence/owner-read-poli
 import { resolveOidcAssetPrincipal } from '@/lib/persistence/oidc-asset-access';
 import { APP_RUNTIME_PAYLOAD_VALIDATORS } from '@/lib/runtime/payload-validators';
 import { withRequestOwnerId } from '@/lib/server/agent-runtime/with-owner';
+import { resolveRequestId } from '@/lib/server/request-id';
 
 export const runtime = 'nodejs';
 
 const ROUTE_PREFIX = '/api/persistence';
-const REQUEST_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
 const log = createLogger('Persistence');
 
 function jsonError(status: number, code: string, message: string): Response {
@@ -308,8 +307,7 @@ interface PersistenceRequestDeps {
 }
 
 function persistenceRequestId(request: Request): string {
-  const upstream = request.headers.get('x-request-id')?.trim();
-  return upstream && REQUEST_ID_PATTERN.test(upstream) ? upstream : randomUUID();
+  return resolveRequestId(request.headers);
 }
 
 async function responseErrorCode(response: Response): Promise<string> {
@@ -326,7 +324,7 @@ export async function handlePersistenceRequest(
   deps: PersistenceRequestDeps = {},
 ): Promise<Response> {
   const requestId = persistenceRequestId(request);
-  const response = await handlePersistenceRequestInner(request, deps);
+  const response = await handlePersistenceRequestInner(request, deps, requestId);
   if (response.status >= 500) {
     const path = new URL(request.url).pathname;
     const code = await responseErrorCode(response);
@@ -339,6 +337,7 @@ export async function handlePersistenceRequest(
 async function handlePersistenceRequestInner(
   request: Request,
   deps: PersistenceRequestDeps,
+  requestId: string,
 ): Promise<Response> {
   const connectionString = process.env.DATABASE_URL;
   if (!connectionString) {
@@ -403,6 +402,7 @@ async function handlePersistenceRequestInner(
       }
     },
     {
+      requestId,
       allowAnonymousPublicRead: (publicRequest) =>
         parseDocumentAction(publicRequest.method, routeRelativePath(publicRequest)).kind ===
           'read' || isAssetContentRead(publicRequest),

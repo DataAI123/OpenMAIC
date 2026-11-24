@@ -21,6 +21,7 @@ import { getOwnerScopedDocumentStore } from '@/lib/server/agent-runtime/owner-sc
 import { ownerJson } from '@/lib/server/agent-runtime/route-response';
 import { withRequestOwnerId } from '@/lib/server/agent-runtime/with-owner';
 import { folderNameErrorResponse } from '@/lib/server/folder-name-errors';
+import { stampRequestId } from '@/lib/server/request-id';
 import { validateFolderName } from '@/lib/utils/folder-name-validation';
 
 export const runtime = 'nodejs';
@@ -38,25 +39,33 @@ function jsonError(status: number, code: string, message: string, headers?: Head
 
 // PATCH /api/folders/[id] — rename { name }.
 export async function PATCH(req: NextRequest, { params }: Params) {
-  if (!isAgentRuntimeConfigured()) return new Response('Not found', { status: 404 });
+  if (!isAgentRuntimeConfigured()) {
+    return stampRequestId(new Response('Not found', { status: 404 }), req.headers);
+  }
 
   let body: unknown;
   try {
     body = await req.json();
   } catch {
-    return jsonError(400, 'INVALID_BODY', 'request body must be JSON');
+    return stampRequestId(jsonError(400, 'INVALID_BODY', 'request body must be JSON'), req.headers);
   }
   const name = (body as { name?: unknown })?.name;
   if (typeof name !== 'string') {
-    return jsonError(400, 'FOLDER_NAME_INVALID', 'name must be a string');
+    return stampRequestId(
+      jsonError(400, 'FOLDER_NAME_INVALID', 'name must be a string'),
+      req.headers,
+    );
   }
   const trimmed = name.trim();
   const check = validateFolderName(trimmed);
   if (!check.ok) {
-    return jsonError(
-      400,
-      check.kind === 'empty' ? 'FOLDER_NAME_EMPTY' : 'FOLDER_NAME_TOO_LONG',
-      check.kind === 'empty' ? 'folder name must not be empty' : 'folder name is too long',
+    return stampRequestId(
+      jsonError(
+        400,
+        check.kind === 'empty' ? 'FOLDER_NAME_EMPTY' : 'FOLDER_NAME_TOO_LONG',
+        check.kind === 'empty' ? 'folder name must not be empty' : 'folder name is too long',
+      ),
+      req.headers,
     );
   }
 
@@ -103,7 +112,9 @@ export async function PATCH(req: NextRequest, { params }: Params) {
 
 // DELETE /api/folders/[id]?mode=ungroup|remove
 export async function DELETE(req: NextRequest, { params }: Params) {
-  if (!isAgentRuntimeConfigured()) return new Response('Not found', { status: 404 });
+  if (!isAgentRuntimeConfigured()) {
+    return stampRequestId(new Response('Not found', { status: 404 }), req.headers);
+  }
 
   const modeParam = req.nextUrl.searchParams.get('mode');
   const mode: 'ungroup' | 'remove' = modeParam === 'remove' ? 'remove' : 'ungroup';

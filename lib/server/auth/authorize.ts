@@ -8,6 +8,7 @@ import {
   type AuthenticatedSession,
 } from './session';
 import { TenantAdminError, type TenantAdminFailure } from './tenant-admin';
+import { REQUEST_ID_HEADER, resolveRequestId } from '@/lib/server/request-id';
 
 const READ_ONLY_METHODS = ['GET', 'HEAD', 'OPTIONS'];
 
@@ -69,6 +70,17 @@ export function tenantAdminFailure(error: unknown): Response {
  * learns "log in" rather than whether the tenant exists.
  */
 export async function withTenantPermission(
+  req: Pick<Request, 'headers' | 'method' | 'url'>,
+  key: PermissionKey,
+  handler: (context: TenantAdminContext) => Promise<Response>,
+): Promise<Response> {
+  const requestId = resolveRequestId(req.headers);
+  const response = await withTenantPermissionInner(req, key, handler);
+  response.headers.set(REQUEST_ID_HEADER, requestId);
+  return response;
+}
+
+async function withTenantPermissionInner(
   req: Pick<Request, 'headers' | 'method' | 'url'>,
   key: PermissionKey,
   handler: (context: TenantAdminContext) => Promise<Response>,
@@ -146,6 +158,16 @@ export interface AuthenticatedIdentity {
  * deployment before touching data.
  */
 export async function withAuthenticatedIdentity(
+  req: Pick<Request, 'headers' | 'method'>,
+  handler: (identity: AuthenticatedIdentity) => Promise<Response>,
+): Promise<Response> {
+  const requestId = resolveRequestId(req.headers);
+  const response = await withAuthenticatedIdentityInner(req, handler);
+  response.headers.set(REQUEST_ID_HEADER, requestId);
+  return response;
+}
+
+async function withAuthenticatedIdentityInner(
   req: Pick<Request, 'headers' | 'method'>,
   handler: (identity: AuthenticatedIdentity) => Promise<Response>,
 ): Promise<Response> {

@@ -14,6 +14,7 @@ import { isAgentRuntimeConfigured } from '@/lib/config/feature-flags';
 import { subscribeAgentEventWakeup } from '@/lib/server/agent-runtime/event-notify-bus';
 import { resolveRequestOwnerIdForRequest } from '@/lib/server/agent-runtime/with-owner';
 import { getAgentSessionStore } from '@/lib/server/agent-runtime/store';
+import { REQUEST_ID_HEADER, stampRequestId } from '@/lib/server/request-id';
 
 export const runtime = 'nodejs';
 // Self-hosted `next start` ignores maxDuration; Vercel's adapter can still use
@@ -37,7 +38,9 @@ function parseLastEventId(value: string | null): bigint {
 }
 
 export async function GET(req: NextRequest) {
-  if (!isAgentRuntimeConfigured()) return new Response('Not found', { status: 404 });
+  if (!isAgentRuntimeConfigured()) {
+    return stampRequestId(new Response('Not found', { status: 404 }), req.headers);
+  }
 
   // Identity belongs to the request, not the URL. EventSource reconnects to
   // this same stable path with the application-session or legacy anonymous
@@ -45,7 +48,19 @@ export async function GET(req: NextRequest) {
   const ownerResolution = await resolveRequestOwnerIdForRequest(req);
   if ('response' in ownerResolution) return ownerResolution.response;
   const { ownerId, responseHeaders } = ownerResolution;
-  const store = await getAgentSessionStore();
+  let store: Awaited<ReturnType<typeof getAgentSessionStore>>;
+  try {
+    store = await getAgentSessionStore();
+  } catch (error) {
+    console.error(
+      `[agent-runtime] failed to prepare owner event stream (requestId=${responseHeaders.get(REQUEST_ID_HEADER)})`,
+      error instanceof Error ? error.name : 'unknown',
+    );
+    return Response.json(
+      { success: false, errorCode: 'UPSTREAM_ERROR', error: 'Agent event stream is unavailable' },
+      { status: 503, headers: responseHeaders },
+    );
+  }
 
   const url = new URL(req.url);
   const lastEventId = parseLastEventId(

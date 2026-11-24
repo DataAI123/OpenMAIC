@@ -19,6 +19,7 @@ import { randomBytes } from 'node:crypto';
 import { isAgentRuntimeConfigured } from '@/lib/config/feature-flags';
 import type { AppDocumentOutline } from '@/lib/document-store/persistence-types';
 import { apiError } from '@/lib/server/api-response';
+import { stampRequestId } from '@/lib/server/request-id';
 import { getOwnerScopedDocumentStore } from '@/lib/server/agent-runtime/owner-scoped-documents';
 import { ownerJson } from '@/lib/server/agent-runtime/route-response';
 import { STAGE_NAME_MAX_LENGTH } from '@/lib/server/agent-runtime/stage-limits';
@@ -33,7 +34,9 @@ function createStageId(): string {
 
 // GET /api/stages — list every stage document owned by the caller.
 export async function GET(req: NextRequest) {
-  if (!isAgentRuntimeConfigured()) return new Response('Not found', { status: 404 });
+  if (!isAgentRuntimeConfigured()) {
+    return stampRequestId(new Response('Not found', { status: 404 }), req.headers);
+  }
 
   return withRequestOwnerId(req, async (ownerId, responseHeaders, identity) => {
     const store = await getOwnerScopedDocumentStore(ownerId, undefined, identity?.tenantId);
@@ -48,31 +51,38 @@ export async function GET(req: NextRequest) {
 // a malformed body must not mint an anonymous cookie partition for a request
 // that will not proceed.
 export async function POST(req: NextRequest) {
-  if (!isAgentRuntimeConfigured()) return new Response('Not found', { status: 404 });
+  if (!isAgentRuntimeConfigured()) {
+    return stampRequestId(new Response('Not found', { status: 404 }), req.headers);
+  }
 
   let body: unknown;
   try {
     body = await req.json();
   } catch {
-    return apiError('INVALID_REQUEST', 400, 'invalid JSON body');
+    return stampRequestId(apiError('INVALID_REQUEST', 400, 'invalid JSON body'), req.headers);
   }
   if (typeof body !== 'object' || body === null) {
-    return apiError('INVALID_REQUEST', 400, 'request body must be a JSON object');
+    return stampRequestId(
+      apiError('INVALID_REQUEST', 400, 'request body must be a JSON object'),
+      req.headers,
+    );
   }
   const { name, description } = body as { name?: unknown; description?: unknown };
   if (typeof name !== 'string' || name.trim().length === 0) {
-    return apiError('MISSING_REQUIRED_FIELD', 400, 'name is required');
+    return stampRequestId(apiError('MISSING_REQUIRED_FIELD', 400, 'name is required'), req.headers);
   }
   const trimmedName = name.trim();
   if (trimmedName.length > STAGE_NAME_MAX_LENGTH) {
-    return apiError(
-      'INVALID_REQUEST',
-      400,
-      `name exceeds the ${STAGE_NAME_MAX_LENGTH} character limit`,
+    return stampRequestId(
+      apiError('INVALID_REQUEST', 400, `name exceeds the ${STAGE_NAME_MAX_LENGTH} character limit`),
+      req.headers,
     );
   }
   if (description !== undefined && typeof description !== 'string') {
-    return apiError('INVALID_REQUEST', 400, 'description must be a string when present');
+    return stampRequestId(
+      apiError('INVALID_REQUEST', 400, 'description must be a string when present'),
+      req.headers,
+    );
   }
   const trimmedDescription = description?.trim();
 

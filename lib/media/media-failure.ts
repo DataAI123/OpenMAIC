@@ -30,6 +30,15 @@
 /** The store is full. Raised by the asset layer, not by a generation route. */
 export const ASSET_QUOTA_EXCEEDED = 'ASSET_QUOTA_EXCEEDED';
 
+export type MediaFailureRecovery = 'login' | 'tenant' | 'retry';
+
+/** Resolve auth recovery before allowing a media retry to call a provider. */
+export function mediaFailureRecovery(errorCode: string | undefined): MediaFailureRecovery {
+  if (errorCode === 'LOGIN_REQUIRED') return 'login';
+  if (errorCode === 'TENANT_REQUIRED') return 'tenant';
+  return 'retry';
+}
+
 /**
  * Codes no retry can change.
  *
@@ -80,6 +89,14 @@ export function isStorageFullFailure(errorCode: string | undefined): boolean {
  * its own state in the renderer, painted before any failure is considered.
  */
 export function mediaFailureNoticeKey(errorCode: string | undefined): string | undefined {
+  if (errorCode === 'LOGIN_REQUIRED' || errorCode === 'TENANT_REQUIRED') {
+    return 'settings.mediaAuthRequired';
+  }
+  if (errorCode === 'AUTH_UNAVAILABLE') return 'auth.unavailable';
+  if (errorCode === 'FORBIDDEN') return 'generation.permissionDenied';
+  if (errorCode === 'MISSING_API_KEY' || errorCode === 'INVALID_CREDENTIALS') {
+    return 'generation.sceneGenerateAuthFailed';
+  }
   if (errorCode === 'CONTENT_SENSITIVE') return 'settings.mediaContentSensitive';
   if (errorCode === ASSET_QUOTA_EXCEEDED) return 'settings.mediaStorageFull';
   return undefined;

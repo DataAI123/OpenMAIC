@@ -37,6 +37,7 @@ async function postExtractDocument(input: {
   providerId?: string;
   apiKey?: string;
   baseUrl?: string;
+  requestId?: string;
 }) {
   const { POST } = await import('@/app/api/extract-document/route');
   const formData = new FormData();
@@ -47,6 +48,7 @@ async function postExtractDocument(input: {
 
   const request = new Request('http://localhost/api/extract-document', {
     method: 'POST',
+    headers: input.requestId ? { 'x-request-id': input.requestId } : undefined,
     body: formData,
   });
   return POST(request as unknown as NextRequest);
@@ -184,10 +186,12 @@ describe('POST /api/extract-document', () => {
       file: new File(['%PDF-1.4'], 'lesson.pdf', { type: 'application/pdf' }),
       providerId: 'mineru-cloud',
       apiKey: 'cloud-key',
+      requestId: 'extract-legacy-request',
     });
     const json = await res.json();
 
     expect(res.status).toBe(200);
+    expect(res.headers.get('x-request-id')).toBe('extract-legacy-request');
     expect(json).toMatchObject({
       success: true,
       data: {

@@ -32,11 +32,11 @@ import { videoProviderFetch } from '../provider-fetch';
 import type { ProviderKeyProbe } from '../provider-key-probe';
 import {
   isCanonicalOpenRouterBaseUrl,
-  openRouterBaseUrl,
   openRouterHeaders,
   probeOpenRouterKey,
   type OpenRouterKeyProbeCopy,
 } from './openrouter-image-adapter';
+import { openRouterBaseUrl } from '../constants';
 
 const POLL_INTERVAL_MS = 10_000; // 10 seconds
 const MAX_POLL_ATTEMPTS = 60; // 10 minutes max

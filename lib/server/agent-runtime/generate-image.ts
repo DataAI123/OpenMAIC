@@ -2,7 +2,8 @@ import type { AgentTool } from '@earendil-works/pi-agent-core';
 import type { AssetStore } from '@openmaic/storage';
 import { Type, type Static } from 'typebox';
 
-import { generateImage, IMAGE_PROVIDERS } from '@/lib/media/image-providers';
+import { IMAGE_PROVIDERS } from '@/lib/media/constants';
+import { generateImage } from '@/lib/media/image-providers';
 import type {
   ImageGenerationConfig,
   ImageGenerationOptions,

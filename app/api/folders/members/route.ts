@@ -24,6 +24,7 @@ import { isAgentRuntimeConfigured } from '@/lib/config/feature-flags';
 import { getOwnerScopedDocumentStore } from '@/lib/server/agent-runtime/owner-scoped-documents';
 import { ownerJson, ownerNotFound } from '@/lib/server/agent-runtime/route-response';
 import { withRequestOwnerId } from '@/lib/server/agent-runtime/with-owner';
+import { stampRequestId } from '@/lib/server/request-id';
 
 export const runtime = 'nodejs';
 
@@ -33,20 +34,28 @@ function jsonError(status: number, code: string, message: string, headers?: Head
 
 // POST /api/folders/members
 export async function POST(req: NextRequest) {
-  if (!isAgentRuntimeConfigured()) return new Response('Not found', { status: 404 });
+  if (!isAgentRuntimeConfigured()) {
+    return stampRequestId(new Response('Not found', { status: 404 }), req.headers);
+  }
 
   let body: unknown;
   try {
     body = await req.json();
   } catch {
-    return jsonError(400, 'INVALID_BODY', 'request body must be JSON');
+    return stampRequestId(jsonError(400, 'INVALID_BODY', 'request body must be JSON'), req.headers);
   }
   const { stageId, folderId } = (body ?? {}) as { stageId?: unknown; folderId?: unknown };
   if (typeof stageId !== 'string' || stageId.length === 0) {
-    return jsonError(400, 'MISSING_STAGE_ID', 'stageId must be a non-empty string');
+    return stampRequestId(
+      jsonError(400, 'MISSING_STAGE_ID', 'stageId must be a non-empty string'),
+      req.headers,
+    );
   }
   if (folderId !== null && (typeof folderId !== 'string' || folderId.length === 0)) {
-    return jsonError(400, 'INVALID_FOLDER_ID', 'folderId must be a non-empty string or null');
+    return stampRequestId(
+      jsonError(400, 'INVALID_FOLDER_ID', 'folderId must be a non-empty string or null'),
+      req.headers,
+    );
   }
 
   return withRequestOwnerId(req, async (ownerId, responseHeaders, identity) => {

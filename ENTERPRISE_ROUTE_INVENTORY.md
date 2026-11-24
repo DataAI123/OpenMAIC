@@ -1,6 +1,6 @@
 # Enterprise identity and route inventory
 
-Generated from `app/api/**/route.ts` by `node scripts/audit-enterprise-routes.mjs`. Routes: 80; explicitly exported HTTP methods: 99.
+Generated from `app/api/**/route.ts` by `node scripts/audit-enterprise-routes.mjs`. Routes: 82; explicitly exported HTTP methods: 101.
 
 > This is a static coverage inventory, not proof that a route is secure. Legacy anonymous owners partition data by a client-held cookie and do not authenticate a person.
 > The OIDC gate column is method-specific. Public candidates still depend on the Node handler and storage layer enforcing owner/public/tombstone policy; this generated file does not prove that behavior.
@@ -56,6 +56,8 @@ Generated from `app/api/**/route.ts` by `node scripts/audit-enterprise-routes.mj
 | `/generate/tts` | `POST` | auth-aware owner boundary (legacy anonymous or database-backed OIDC session; audit each method) | 精确 POST：签名应用会话 + handler 内 withRequestOwnerId 边界（非 GET/跨 Origin/ viewer 拒绝）+ 每用户分模态月额度 reserve→settle（超限 429、存储不可用 503 fail-closed）；仅创建、不按 id 读取 | 计算/成本：认证主体 + 限流/预算 + 请求归属；临时公开例外需记录 |
 | `/generate/video` | `POST` | auth-aware owner boundary (legacy anonymous or database-backed OIDC session; audit each method) | 精确 POST：签名应用会话 + handler 内 withRequestOwnerId 边界（非 GET/跨 Origin/ viewer 拒绝）+ 每用户分模态月额度 reserve→settle（超限 429、存储不可用 503 fail-closed）；仅创建、不按 id 读取 | 计算/成本：认证主体 + 限流/预算 + 请求归属；临时公开例外需记录 |
 | `/generate/voice` | `POST` | auth-aware owner boundary (legacy anonymous or database-backed OIDC session; audit each method) | 精确 POST：签名应用会话 + handler 内 withRequestOwnerId 边界（未登 401、viewer 写 403、跨 Origin 403）；每用户固定窗 5 次/60 秒（429+Retry-After、存储不可用 503，迁移 0010），quiz-grade/agent-profiles 另走 LLM token 月配额；voice 另有严格 public-only SSRF 入口守卫；其它方法/子路径保持 503 | 计算/成本：认证主体 + 限流/预算 + 请求归属；临时公开例外需记录 |
+| `/health/live` | `GET` | 未发现身份校验 | 精确 GET/HEAD：公开进程存活探针；其他方法和子路径仍受默认拒绝 | 公开 GET/HEAD：进程存活探针；不查询数据库、存储或供应商，仅输出非敏感状态 |
+| `/health/ready` | `GET` | 未发现身份校验 | 精确 GET/HEAD：公开应用就绪探针；其他方法和子路径仍受默认拒绝 | 公开 GET/HEAD：应用就绪探针；仅返回最小可用状态，不暴露依赖详情 |
 | `/health` | `GET` | 未发现身份校验 | 公开 GET：仅健康探针 | 公开：健康探针；仅输出非敏感状态 |
 | `/materials/:id` | `GET` | auth-aware owner boundary (legacy anonymous or database-backed OIDC session; audit each method) | 应用会话 + Node 层数据库会话复核 + 本路由 owner/资源授权 | 资源级：认证主体 + 资源 owner/公开状态 + 子资源策略 |
 | `/materials` | `GET` | auth-aware owner boundary (legacy anonymous or database-backed OIDC session; audit each method) | 应用会话 + Node 层数据库会话复核 + 本路由 owner/资源授权 | 资源级：认证主体 + 资源 owner/公开状态 + 子资源策略 |

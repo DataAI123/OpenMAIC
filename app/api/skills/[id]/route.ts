@@ -4,6 +4,7 @@ import type { NextRequest } from 'next/server';
 import { isAgentRuntimeConfigured } from '@/lib/config/feature-flags';
 import { findUserSkill } from '@/lib/server/agent-runtime/user-skills';
 import { withRequestOwnerId } from '@/lib/server/agent-runtime/with-owner';
+import { stampRequestId } from '@/lib/server/request-id';
 import {
   buildBuiltinSkillZip,
   buildOpenClawSkillZip,
@@ -21,16 +22,17 @@ function zipResponse(id: string, zip: Buffer, headers = new Headers()): Response
 }
 
 export async function GET(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
-  if (!isAgentRuntimeConfigured()) return new Response('Not found', { status: 404 });
+  const stamp = <T extends Response>(response: T) => stampRequestId(response, req.headers);
+  if (!isAgentRuntimeConfigured()) return stamp(new Response('Not found', { status: 404 }));
   const { id } = await params;
-  if (!isSafeSkillId(id)) return new Response('Invalid skill id', { status: 400 });
+  if (!isSafeSkillId(id)) return stamp(new Response('Invalid skill id', { status: 400 }));
 
   if (id === 'openmaic') {
     const zip = await buildOpenClawSkillZip();
-    return zip ? zipResponse(id, zip) : new Response('Not found', { status: 404 });
+    return stamp(zip ? zipResponse(id, zip) : new Response('Not found', { status: 404 }));
   }
   const builtin = await buildBuiltinSkillZip(id);
-  if (builtin) return zipResponse(id, builtin);
+  if (builtin) return stamp(zipResponse(id, builtin));
 
   return withRequestOwnerId(req, async (ownerId, responseHeaders) => {
     const skill = await findUserSkill(id, ownerId);

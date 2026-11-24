@@ -47,8 +47,13 @@ beforeEach(() => {
 describe('GET /api/folders', () => {
   it('gates on the configured runtime', async () => {
     mocks.runtimeConfigured = false;
-    const response = await GET(routeRequest('http://localhost/api/folders'));
+    const response = await GET(
+      routeRequest('http://localhost/api/folders', {
+        headers: { 'x-request-id': 'folders-disabled-get' },
+      }),
+    );
     expect(response.status).toBe(404);
+    expect(response.headers.get('x-request-id')).toBe('folders-disabled-get');
   });
 
   it('lists the caller’s folders with their owner key', async () => {
@@ -64,11 +69,14 @@ describe('GET /api/folders', () => {
 });
 
 describe('POST /api/folders', () => {
-  async function post(body: unknown) {
+  async function post(body: unknown, requestId?: string) {
     return POST(
       routeRequest('http://localhost/api/folders', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(requestId ? { 'x-request-id': requestId } : {}),
+        },
         body: JSON.stringify(body),
       }),
     );
@@ -86,8 +94,9 @@ describe('POST /api/folders', () => {
   });
 
   it('rejects an empty name (whitespace only)', async () => {
-    const response = await post({ name: '   ' });
+    const response = await post({ name: '   ' }, 'folders-empty-name');
     expect(response.status).toBe(400);
+    expect(response.headers.get('x-request-id')).toBe('folders-empty-name');
     await expect(response.json()).resolves.toMatchObject({
       error: { code: 'FOLDER_NAME_EMPTY' },
     });
@@ -124,6 +133,20 @@ describe('POST /api/folders', () => {
 });
 
 describe('PATCH /api/folders/[id]', () => {
+  it('correlates a validation refusal before owner resolution', async () => {
+    const response = await PATCH(
+      routeRequest('http://localhost/api/folders/folder-a', {
+        method: 'PATCH',
+        headers: { 'x-request-id': 'folder-rename-invalid' },
+        body: JSON.stringify({ name: 17 }),
+      }),
+      params('folder-a'),
+    );
+
+    expect(response.status).toBe(400);
+    expect(response.headers.get('x-request-id')).toBe('folder-rename-invalid');
+  });
+
   it('renames a folder and returns it', async () => {
     await mocks.fakeStore!.store.createFolder('folder-a', 'Math');
     const response = await PATCH(
@@ -178,6 +201,20 @@ describe('PATCH /api/folders/[id]', () => {
 });
 
 describe('DELETE /api/folders/[id]', () => {
+  it('correlates the runtime gate refusal', async () => {
+    mocks.runtimeConfigured = false;
+    const response = await DELETE(
+      routeRequest('http://localhost/api/folders/folder-a', {
+        method: 'DELETE',
+        headers: { 'x-request-id': 'folder-delete-disabled' },
+      }),
+      params('folder-a'),
+    );
+
+    expect(response.status).toBe(404);
+    expect(response.headers.get('x-request-id')).toBe('folder-delete-disabled');
+  });
+
   it("defaults to 'ungroup' and returns no removed members", async () => {
     await mocks.fakeStore!.store.createFolder('folder-a', 'Math');
     const response = await DELETE(
@@ -220,11 +257,14 @@ describe('DELETE /api/folders/[id]', () => {
 });
 
 describe('POST /api/folders/members', () => {
-  async function post(body: unknown) {
+  async function post(body: unknown, requestId?: string) {
     return postMembers(
       routeRequest('http://localhost/api/folders/members', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(requestId ? { 'x-request-id': requestId } : {}),
+        },
         body: JSON.stringify(body),
       }),
     );
@@ -255,8 +295,9 @@ describe('POST /api/folders/members', () => {
   });
 
   it('rejects a missing stageId', async () => {
-    const response = await post({ folderId: null });
+    const response = await post({ folderId: null }, 'folder-member-missing-stage');
     expect(response.status).toBe(400);
+    expect(response.headers.get('x-request-id')).toBe('folder-member-missing-stage');
     await expect(response.json()).resolves.toMatchObject({
       error: { code: 'MISSING_STAGE_ID' },
     });

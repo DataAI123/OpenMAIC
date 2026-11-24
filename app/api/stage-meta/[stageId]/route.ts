@@ -27,6 +27,7 @@ import { NextResponse } from 'next/server';
 import { isServerPersistenceConfigured } from '@/lib/config/feature-flags';
 import { isOwnerReadEnforcementEnabled } from '@/lib/persistence/owner-read-policy';
 import { resolveStageAccess } from '@/lib/server/stage-access';
+import { stampRequestId } from '@/lib/server/request-id';
 import { withRequestOwnerId } from '@/lib/server/agent-runtime/with-owner';
 
 // Per-viewer and mutable on every publish/unpublish/delete: this response must
@@ -45,7 +46,9 @@ export async function GET(req: NextRequest, { params }: Params) {
   // course in that configuration, which left its viewers with no ownership
   // signal at all — indistinguishable, to a client, from "this course has no
   // owner".
-  if (!isServerPersistenceConfigured()) return new Response('Not found', { status: 404 });
+  if (!isServerPersistenceConfigured()) {
+    return stampRequestId(new Response('Not found', { status: 404 }), req.headers);
+  }
 
   return withRequestOwnerId(
     req,
@@ -89,8 +92,9 @@ export async function GET(req: NextRequest, { params }: Params) {
         );
       } catch (error) {
         console.error('Failed to resolve stage meta', {
+          requestId: responseHeaders.get('x-request-id'),
           stageId,
-          error: error instanceof Error ? error.message : String(error),
+          errorType: error instanceof Error ? error.name : 'unknown',
         });
         return NextResponse.json(
           { error: 'internal_error' },

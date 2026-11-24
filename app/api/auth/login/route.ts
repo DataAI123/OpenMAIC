@@ -2,6 +2,7 @@ import * as oidc from 'openid-client';
 import { NextRequest, NextResponse } from 'next/server';
 
 import { resolveAuthConfig } from '@/lib/server/auth/config';
+import { stampRequestId } from '@/lib/server/request-id';
 import {
   countFlowCookies,
   oidcFlowLimits,
@@ -20,7 +21,7 @@ function errorResponse(status: number, code: string): NextResponse {
   );
 }
 
-export async function GET(request: NextRequest): Promise<NextResponse> {
+async function handleGet(request: NextRequest): Promise<NextResponse> {
   let config;
   try {
     config = resolveAuthConfig();
@@ -67,5 +68,17 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       error instanceof Error ? error.name : 'unknown',
     );
     return errorResponse(503, 'AUTH_UNAVAILABLE');
+  }
+}
+
+export async function GET(request: NextRequest): Promise<NextResponse> {
+  try {
+    return stampRequestId(await handleGet(request), request.headers);
+  } catch (error) {
+    console.error(
+      '[auth] OIDC login route failed',
+      error instanceof Error ? error.name : 'unknown',
+    );
+    return stampRequestId(errorResponse(503, 'AUTH_UNAVAILABLE'), request.headers);
   }
 }

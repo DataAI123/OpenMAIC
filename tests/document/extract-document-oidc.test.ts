@@ -135,4 +135,23 @@ describe('POST /api/extract-document OIDC identity boundary', () => {
     expect(response.status).toBe(401);
     expect(mocks.resolveServerAsset).not.toHaveBeenCalled();
   });
+
+  it('returns a correlated sanitized error when auth configuration is unavailable', async () => {
+    mocks.resolveAuthConfig.mockImplementation(() => {
+      throw new Error('private configuration details');
+    });
+    const request = new Request('https://openmaic.example.com/api/extract-document', {
+      method: 'POST',
+      headers: { 'x-request-id': 'extract-auth-config-failure' },
+    });
+
+    const { POST } = await import('@/app/api/extract-document/route');
+    const response = await POST(request as unknown as NextRequest);
+
+    expect(response.status).toBe(503);
+    expect(response.headers.get('x-request-id')).toBe('extract-auth-config-failure');
+    const body = await response.text();
+    expect(body).toContain('INTERNAL_ERROR');
+    expect(body).not.toContain('private configuration details');
+  });
 });

@@ -213,6 +213,33 @@ describe('POST /api/access-code/verify — cookie', () => {
     const [, , options] = mocks.cookieSet.mock.calls[0];
     expect(options.maxAge).toBe(ACCESS_TOKEN_MAX_AGE_SECONDS);
   });
+
+  it('echoes the normalized request id on both rejection and success', async () => {
+    const POST = await loadPost();
+
+    const rejected = await POST(verifyRequest('wrong-code', { 'x-request-id': 'verify:rejected' }));
+    const accepted = await POST(verifyRequest(ACCESS_CODE, { 'x-request-id': 'verify:accepted' }));
+
+    expect(rejected.status).toBe(401);
+    expect(rejected.headers.get('x-request-id')).toBe('verify:rejected');
+    expect(accepted.status).toBe(200);
+    expect(accepted.headers.get('x-request-id')).toBe('verify:accepted');
+  });
+
+  it('correlates unexpected cookie-store failures without returning their details', async () => {
+    mocks.cookieSet.mockImplementation(() => {
+      throw new Error('private cookie-store detail');
+    });
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const POST = await loadPost();
+
+    const response = await POST(verifyRequest(ACCESS_CODE, { 'x-request-id': 'verify:error' }));
+
+    expect(response.status).toBe(500);
+    expect(response.headers.get('x-request-id')).toBe('verify:error');
+    expect(await response.text()).not.toContain('private cookie-store detail');
+    expect(error).toHaveBeenCalled();
+  });
 });
 
 describe('POST /api/access-code/verify — short-code warning', () => {

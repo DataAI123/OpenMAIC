@@ -1,16 +1,22 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   AUTH_UNAVAILABLE_ERROR_CODE,
   isAuthUnavailableError,
   isLoginRequiredError,
   isLoginRequiredFailure,
+  isTenantRequiredError,
+  isTenantRequiredFailure,
   loginHref,
   LOGIN_REQUIRED_ERROR_CODE,
+  TENANT_REQUIRED_ERROR_CODE,
   readAuthResult,
+  recoverClientAuthFailure,
   safeRelativeReturnTo,
   withoutAuthResult,
 } from '@/lib/auth/client-login';
+
+afterEach(() => vi.unstubAllGlobals());
 
 describe('login_required detection', () => {
   it('matches only the exact 401 the gate uses', () => {
@@ -27,6 +33,71 @@ describe('login_required detection', () => {
     expect(isLoginRequiredError('LOGIN_REQUIRED')).toBe(false);
     expect(isAuthUnavailableError(new Error(AUTH_UNAVAILABLE_ERROR_CODE))).toBe(true);
     expect(isAuthUnavailableError(new Error(LOGIN_REQUIRED_ERROR_CODE))).toBe(false);
+  });
+});
+
+describe('tenant_required detection', () => {
+  it('matches only the tenant selection refusal envelope', () => {
+    expect(isTenantRequiredFailure(403, TENANT_REQUIRED_ERROR_CODE)).toBe(true);
+    expect(isTenantRequiredFailure(403, 'FORBIDDEN')).toBe(false);
+    expect(isTenantRequiredFailure(401, TENANT_REQUIRED_ERROR_CODE)).toBe(false);
+    expect(isTenantRequiredFailure(503, TENANT_REQUIRED_ERROR_CODE)).toBe(false);
+    expect(isTenantRequiredFailure(403, undefined)).toBe(false);
+  });
+
+  it('recognizes the thrown server-action form without treating other auth errors as selection', () => {
+    expect(isTenantRequiredError(new Error(TENANT_REQUIRED_ERROR_CODE))).toBe(true);
+    expect(isTenantRequiredError(new Error(LOGIN_REQUIRED_ERROR_CODE))).toBe(false);
+    expect(isTenantRequiredError(new Error(AUTH_UNAVAILABLE_ERROR_CODE))).toBe(false);
+    expect(isTenantRequiredError('TENANT_REQUIRED')).toBe(false);
+  });
+});
+
+describe('client auth response recovery', () => {
+  it('redirects exact login failures while preserving the current page', async () => {
+    const assign = vi.fn();
+    const reload = vi.fn();
+    vi.stubGlobal('window', {
+      location: { assign, reload, pathname: '/settings', search: '?tab=general', hash: '#tenant' },
+    });
+
+    const response = new Response(JSON.stringify({ errorCode: LOGIN_REQUIRED_ERROR_CODE }), {
+      status: 401,
+      headers: { 'content-type': 'application/json' },
+    });
+    await expect(recoverClientAuthFailure(response)).resolves.toBe(true);
+    expect(assign).toHaveBeenCalledWith(
+      '/api/auth/login?returnTo=%2Fsettings%3Ftab%3Dgeneral%23tenant',
+    );
+    expect(reload).not.toHaveBeenCalled();
+  });
+
+  it('reloads for tenant selection and ignores other forbidden responses', async () => {
+    const assign = vi.fn();
+    const reload = vi.fn();
+    vi.stubGlobal('window', {
+      location: { assign, reload, pathname: '/settings', search: '', hash: '' },
+    });
+
+    const tenantRequired = new Response(JSON.stringify({ errorCode: TENANT_REQUIRED_ERROR_CODE }), {
+      status: 403,
+      headers: { 'content-type': 'application/json' },
+    });
+    await expect(recoverClientAuthFailure(tenantRequired)).resolves.toBe(true);
+    expect(reload).toHaveBeenCalledOnce();
+
+    const forbidden = new Response(JSON.stringify({ errorCode: 'FORBIDDEN' }), {
+      status: 403,
+      headers: { 'content-type': 'application/json' },
+    });
+    await expect(recoverClientAuthFailure(forbidden)).resolves.toBe(false);
+    expect(assign).not.toHaveBeenCalled();
+    expect(reload).toHaveBeenCalledOnce();
+  });
+
+  it('ignores responses without a valid JSON error code', async () => {
+    const response = new Response('unauthorized', { status: 401 });
+    await expect(recoverClientAuthFailure(response)).resolves.toBe(false);
   });
 });
 

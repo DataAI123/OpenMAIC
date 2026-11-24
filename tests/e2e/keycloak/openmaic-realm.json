@@ -1,0 +1,59 @@
+{
+  "realm": "openmaic",
+  "enabled": true,
+  "sslRequired": "external",
+  "registrationAllowed": false,
+  "loginWithEmailAllowed": false,
+  "clients": [
+    {
+      "clientId": "openmaic-e2e",
+      "name": "OpenMAIC disposable enterprise E2E",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "openmaic-e2e-only-client-secret",
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "redirectUris": ["https://localhost:3002/api/auth/callback"],
+      "webOrigins": ["https://localhost:3002"],
+      "attributes": {
+        "pkce.code.challenge.method": "S256"
+      }
+    }
+  ],
+  "users": [
+    {
+      "id": "8c1d8120-15ec-49d1-b7de-26014bca9121",
+      "username": "enterprise-owner",
+      "enabled": true,
+      "email": "owner@example.test",
+      "emailVerified": true,
+      "firstName": "Enterprise",
+      "lastName": "Owner",
+      "credentials": [{ "type": "password", "value": "Owner-E2E-only-2026", "temporary": false }]
+    },
+    {
+      "id": "5ba11d64-02c3-4d78-b696-99ac0ed5dbab",
+      "username": "enterprise-viewer",
+      "enabled": true,
+      "email": "viewer@example.test",
+      "emailVerified": true,
+      "firstName": "Enterprise",
+      "lastName": "Viewer",
+      "credentials": [{ "type": "password", "value": "Viewer-E2E-only-2026", "temporary": false }]
+    },
+    {
+      "id": "ca584c2e-4d79-48b4-8742-f9722c520a27",
+      "username": "enterprise-selector",
+      "enabled": true,
+      "email": "selector@example.test",
+      "emailVerified": true,
+      "firstName": "Enterprise",
+      "lastName": "Selector",
+      "credentials": [{ "type": "password", "value": "Selector-E2E-only-2026", "temporary": false }]
+    }
+  ]
+}

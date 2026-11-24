@@ -30,8 +30,7 @@ import type {
   ProviderKeyProbeInput,
   ProviderKeyProbeResult,
 } from '../provider-key-probe';
-
-export const OPENROUTER_DEFAULT_BASE_URL = 'https://openrouter.ai/api/v1';
+import { OPENROUTER_DEFAULT_BASE_URL, openRouterBaseUrl } from '../constants';
 
 /** Dimension defaults per aspect ratio, mirroring the other image adapters. */
 function getDimensions(aspectRatio?: string): { width: number; height: number } {
@@ -45,19 +44,6 @@ function getDimensions(aspectRatio?: string): { width: number; height: number } 
     default:
       return { width: 1280, height: 720 }; // 16:9
   }
-}
-
-/**
- * Normalise a user-entered base URL to the API root.
- *
- * The settings field is labelled "Base URL" but reads like a request URL, so
- * pasting the full endpoint (`.../api/v1/images`) is the natural mistake — and
- * it silently builds `.../api/v1/images/images`, which 404s. Trim a trailing
- * slash and a trailing `/images` or `/videos` so both forms work.
- */
-export function openRouterBaseUrl(baseUrl?: string): string {
-  const raw = baseUrl?.trim() || OPENROUTER_DEFAULT_BASE_URL;
-  return raw.replace(/\/+$/, '').replace(/\/(images|videos)$/, '');
 }
 
 export function openRouterHeaders(apiKey: string): Record<string, string> {

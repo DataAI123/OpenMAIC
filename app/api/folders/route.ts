@@ -28,6 +28,7 @@ import { getOwnerScopedDocumentStore } from '@/lib/server/agent-runtime/owner-sc
 import { ownerJson } from '@/lib/server/agent-runtime/route-response';
 import { withRequestOwnerId } from '@/lib/server/agent-runtime/with-owner';
 import { folderNameErrorResponse } from '@/lib/server/folder-name-errors';
+import { stampRequestId } from '@/lib/server/request-id';
 import { createFolderForOwner, listFoldersForOwner } from '@/lib/server/folder-persistence';
 import { validateFolderName } from '@/lib/utils/folder-name-validation';
 
@@ -50,7 +51,9 @@ function jsonError(status: number, code: string, message: string, headers?: Head
 
 // GET /api/folders — list the caller's folders, ordered by `order` asc.
 export async function GET(req: NextRequest) {
-  if (!isAgentRuntimeConfigured()) return new Response('Not found', { status: 404 });
+  if (!isAgentRuntimeConfigured()) {
+    return stampRequestId(new Response('Not found', { status: 404 }), req.headers);
+  }
 
   return withRequestOwnerId(req, async (ownerId, responseHeaders, identity) => {
     try {
@@ -78,25 +81,33 @@ export async function GET(req: NextRequest) {
 // malformed body must not mint an anonymous cookie partition for a request
 // that will not proceed.
 export async function POST(req: NextRequest) {
-  if (!isAgentRuntimeConfigured()) return new Response('Not found', { status: 404 });
+  if (!isAgentRuntimeConfigured()) {
+    return stampRequestId(new Response('Not found', { status: 404 }), req.headers);
+  }
 
   let body: unknown;
   try {
     body = await req.json();
   } catch {
-    return jsonError(400, 'INVALID_BODY', 'request body must be JSON');
+    return stampRequestId(jsonError(400, 'INVALID_BODY', 'request body must be JSON'), req.headers);
   }
   const name = (body as { name?: unknown })?.name;
   if (typeof name !== 'string') {
-    return jsonError(400, 'FOLDER_NAME_INVALID', 'name must be a string');
+    return stampRequestId(
+      jsonError(400, 'FOLDER_NAME_INVALID', 'name must be a string'),
+      req.headers,
+    );
   }
   const trimmed = name.trim();
   const check = validateFolderName(trimmed);
   if (!check.ok) {
-    return jsonError(
-      400,
-      check.kind === 'empty' ? 'FOLDER_NAME_EMPTY' : 'FOLDER_NAME_TOO_LONG',
-      check.kind === 'empty' ? 'folder name must not be empty' : 'folder name is too long',
+    return stampRequestId(
+      jsonError(
+        400,
+        check.kind === 'empty' ? 'FOLDER_NAME_EMPTY' : 'FOLDER_NAME_TOO_LONG',
+        check.kind === 'empty' ? 'folder name must not be empty' : 'folder name is too long',
+      ),
+      req.headers,
     );
   }
 

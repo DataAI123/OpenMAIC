@@ -6,6 +6,7 @@ import { createAccessToken } from '@/lib/server/access-token';
 import { accessCodeAttemptLimiter } from '@/lib/server/attempt-limiter';
 import { clientIdentity, isTrustedProxyIdentity } from '@/lib/server/client-identity';
 import { warnIfAccessCodeIsShort } from '@/lib/server/access-code-warning';
+import { stampRequestId } from '@/lib/server/request-id';
 
 /**
  * Pull the candidate code out of an already-parsed JSON body. Anything that is
@@ -17,7 +18,7 @@ function readCandidateCode(body: unknown): string | null {
   return typeof candidate === 'string' && candidate.length > 0 ? candidate : null;
 }
 
-export async function POST(request: Request) {
+async function handlePost(request: Request) {
   const accessCode = process.env.ACCESS_CODE;
   if (!accessCode) {
     return apiSuccess({ valid: true });
@@ -77,4 +78,18 @@ export async function POST(request: Request) {
   });
 
   return apiSuccess({ valid: true });
+}
+
+export async function POST(request: Request) {
+  try {
+    return stampRequestId(await handlePost(request), request.headers);
+  } catch (error) {
+    console.error(
+      '[access-code] verify route failed',
+      error instanceof Error ? error.name : 'unknown',
+    );
+    const response = apiError('INTERNAL_ERROR', 500, 'Internal server error');
+    response.headers.set('Cache-Control', 'no-store');
+    return stampRequestId(response, request.headers);
+  }
 }

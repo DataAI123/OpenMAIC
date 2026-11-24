@@ -3,6 +3,11 @@ import type { NextConfig } from 'next';
 const isVercelBuild = Boolean(process.env.VERCEL);
 
 const nextConfig: NextConfig = {
+  // `next dev` binds 0.0.0.0, so a page served from an IP origin (the OIDC
+  // redirect URI is registered for 127.0.0.1, not localhost) counts as
+  // cross-origin and its chunk/HMR requests get 403 — which leaves
+  // framer-motion stuck at its `initial` styles, i.e. an invisible page.
+  allowedDevOrigins: ['127.0.0.1', '127.0.0.1:3000', '127.0.0.1:3100'],
   output: process.env.VERCEL ? undefined : 'standalone',
   outputFileTracingIncludes: {
     '/*': [

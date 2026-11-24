@@ -1,5 +1,9 @@
 /**
  * Video Generation Service -- routes to provider adapters
+ *
+ * The provider catalog itself is browser-safe and lives in ./constants: this
+ * module reaches the server-side transport through the adapters, so importing
+ * the catalog from here would pull Node-only code into the client bundle.
  */
 
 import type {
@@ -7,8 +11,8 @@ import type {
   VideoGenerationConfig,
   VideoGenerationOptions,
   VideoGenerationResult,
-  VideoProviderConfig,
 } from './types';
+import { VIDEO_PROVIDERS } from './constants';
 import { generateWithSeedance, testSeedanceConnectivity } from './adapters/seedance-adapter';
 import { generateWithKling, testKlingConnectivity } from './adapters/kling-adapter';
 import { generateWithVeo, testVeoConnectivity } from './adapters/veo-adapter';
@@ -23,128 +27,7 @@ import {
   testOpenRouterVideoConnectivity,
   OPENROUTER_VIDEO_KEY_PROBE,
 } from './adapters/openrouter-video-adapter';
-import { OPENROUTER_DEFAULT_BASE_URL } from './adapters/openrouter-image-adapter';
 import type { ProviderKeyProbe } from './provider-key-probe';
-
-export const VIDEO_PROVIDERS: Record<VideoProviderId, VideoProviderConfig> = {
-  seedance: {
-    id: 'seedance',
-    name: 'Seedance',
-    requiresApiKey: true,
-    defaultBaseUrl: 'https://ark.cn-beijing.volces.com',
-    models: [
-      { id: 'doubao-seedance-2-0-260128', name: 'Seedance 2.0' },
-      {
-        id: 'doubao-seedance-2-0-fast-260128',
-        name: 'Seedance 2.0 Fast',
-      },
-      {
-        id: 'doubao-seedance-2-0-mini-260615',
-        name: 'Seedance 2.0 Mini',
-      },
-      { id: 'doubao-seedance-1-5-pro-251215', name: 'Seedance 1.5 Pro' },
-      { id: 'doubao-seedance-1-0-pro-250528', name: 'Seedance 1.0 Pro' },
-      {
-        id: 'doubao-seedance-1-0-pro-fast-251015',
-        name: 'Seedance 1.0 Pro Fast',
-      },
-      {
-        id: 'doubao-seedance-1-0-lite-t2v-250428',
-        name: 'Seedance 1.0 Lite T2V',
-      },
-    ],
-    supportedAspectRatios: ['16:9', '4:3', '1:1', '9:16', '3:4', '21:9'],
-    supportedDurations: [5, 10],
-    supportedResolutions: ['480p', '720p', '1080p'],
-    maxDuration: 10,
-  },
-  kling: {
-    id: 'kling',
-    name: 'Kling',
-    requiresApiKey: true,
-    defaultBaseUrl: 'https://api-beijing.klingai.com',
-    models: [
-      { id: 'kling-v2-6', name: 'Kling V2.6' },
-      { id: 'kling-v1-6', name: 'Kling V1.6' },
-    ],
-    supportedAspectRatios: ['16:9', '1:1', '9:16'],
-    supportedDurations: [5, 10],
-    maxDuration: 10,
-  },
-  veo: {
-    id: 'veo',
-    name: 'Veo',
-    requiresApiKey: true,
-    defaultBaseUrl: 'https://generativelanguage.googleapis.com',
-    models: [
-      { id: 'veo-3.1-fast-generate-001', name: 'Veo 3.1 Fast' },
-      { id: 'veo-3.1-generate-001', name: 'Veo 3.1' },
-      { id: 'veo-3.0-fast-generate-001', name: 'Veo 3.0 Fast' },
-      { id: 'veo-3.0-generate-001', name: 'Veo 3.0' },
-      { id: 'veo-2.0-generate-001', name: 'Veo 2.0' },
-    ],
-    supportedAspectRatios: ['16:9', '1:1', '9:16'],
-    supportedDurations: [8],
-    supportedResolutions: ['720p'],
-    maxDuration: 8,
-  },
-  'minimax-video': {
-    id: 'minimax-video',
-    name: 'MiniMax Video',
-    requiresApiKey: true,
-    defaultBaseUrl: 'https://api.minimaxi.com',
-    // Hailuo 2.3 Fast requires Image-to-Video with first_frame_image; this
-    // provider currently submits Text-to-Video requests only.
-    models: [
-      { id: 'MiniMax-Hailuo-2.3', name: 'Hailuo 2.3' },
-      { id: 'MiniMax-Hailuo-02', name: 'Hailuo 02' },
-      { id: 'T2V-01-Director', name: 'T2V-01 Director' },
-      { id: 'T2V-01', name: 'T2V-01' },
-    ],
-    supportedAspectRatios: ['16:9', '4:3', '1:1', '9:16'],
-    supportedDurations: [6, 10],
-    supportedResolutions: ['720p', '1080p'],
-    maxDuration: 10,
-  },
-  'grok-video': {
-    id: 'grok-video',
-    name: 'Grok Video (xAI)',
-    requiresApiKey: true,
-    defaultBaseUrl: 'https://api.x.ai/v1',
-    models: [{ id: 'grok-imagine-video', name: 'Grok Imagine Video' }],
-    supportedAspectRatios: ['16:9', '1:1', '9:16'],
-    supportedDurations: [6],
-    maxDuration: 6,
-  },
-  happyhorse: {
-    id: 'happyhorse',
-    name: 'HappyHorse',
-    requiresApiKey: true,
-    defaultBaseUrl: 'https://dashscope.aliyuncs.com',
-    models: [{ id: 'happyhorse-1.0-t2v', name: 'HappyHorse 1.0 T2V' }],
-    supportedAspectRatios: ['16:9', '9:16', '1:1', '4:3', '3:4'],
-    supportedDurations: [5, 10, 15],
-    supportedResolutions: ['720p', '1080p'],
-    maxDuration: 15,
-  },
-  'openrouter-video': {
-    id: 'openrouter-video',
-    name: 'OpenRouter Video',
-    requiresApiKey: true,
-    defaultBaseUrl: OPENROUTER_DEFAULT_BASE_URL,
-    // Model list is fetched live from OpenRouter's public GET /videos/models
-    // catalog; this seed keeps the picker usable offline.
-    models: [
-      { id: 'google/veo-3.1', name: 'Veo 3.1' },
-      { id: 'kwaivgi/kling-v3.0-pro', name: 'Kling v3.0 Pro' },
-      { id: 'bytedance/seedance-2.5', name: 'Seedance 2.5' },
-    ],
-    supportedAspectRatios: ['16:9', '9:16', '1:1', '4:3', '3:4', '21:9'],
-    supportedDurations: [4, 5, 6, 8, 10],
-    supportedResolutions: ['480p', '720p', '1080p'],
-    maxDuration: 10,
-  },
-};
 
 export async function testVideoConnectivity(
   config: VideoGenerationConfig,

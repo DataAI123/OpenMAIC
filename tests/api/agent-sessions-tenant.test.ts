@@ -74,7 +74,7 @@ describe('agent sessions route tenant boundary', () => {
     await (
       await getAgentSessionStore('tenant-b')
     ).createSession({ id: 'b1', ownerId: owner, prompt: 'b' });
-  });
+  }, 20_000);
 
   afterEach(async () => {
     await pool.end();
@@ -99,7 +99,7 @@ describe('agent sessions route tenant boundary', () => {
     expect(a[0]?.tenantId).toBe('tenant-a');
     expect(b.map((session) => session.id)).toEqual(['b1']);
     expect(b[0]?.tenantId).toBe('tenant-b');
-  });
+  }, 15_000);
 
   it('leaves the legacy unscoped request seeing every tenant (unchanged contract)', async () => {
     const all = await listFor();

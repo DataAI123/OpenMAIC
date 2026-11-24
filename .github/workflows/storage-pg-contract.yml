@@ -76,3 +76,29 @@ jobs:
             tests/persistence/document-asset-references.pg.test.ts \
             tests/persistence/asset-reference-backfill.pg.test.ts \
             tests/persistence/workbench-tool-asset-references.pg.test.ts
+
+      # Real multi-connection contracts for durable agent leases/events and
+      # owner-material quota reservations. Keep their collection and skip
+      # count required: these suites use describe.skipIf without PG_CONTRACT_URL.
+      - name: Required enterprise PostgreSQL contracts
+        env:
+          ENTERPRISE_PG_REGRESSION_REQUIRED: '1'
+          ENTERPRISE_PG_VITEST_RESULTS: ${{ runner.temp }}/enterprise-pg-vitest.json
+        run: |
+          set -euo pipefail
+          pnpm exec vitest run --reporter=default --reporter=json \
+            --outputFile.json="$ENTERPRISE_PG_VITEST_RESULTS" \
+            tests/agent-runtime/event-notify.pg.test.ts \
+            tests/agent-runtime/park-attempt-budget.pg.test.ts \
+            tests/agent-runtime/session-events-live.pg.test.ts \
+            tests/persistence/owner-materials.pg.test.ts
+          node scripts/assert-enterprise-regression-suites.mjs --postgres \
+            "$ENTERPRISE_PG_VITEST_RESULTS"
+
+      # Exercise the actual migration runner in a private schema on the same
+      # PostgreSQL 16 service: clean upgrade, representative legacy backfills,
+      # idempotent rerun, and rejection of a recorded checksum mismatch.
+      - name: Required migration-runner PostgreSQL contract
+        env:
+          ENTERPRISE_MIGRATION_PG_REQUIRED: '1'
+        run: node scripts/assert-migration-runner-postgres.mjs

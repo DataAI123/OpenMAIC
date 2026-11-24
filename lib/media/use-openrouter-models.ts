@@ -18,7 +18,7 @@ import { useEffect, useState } from 'react';
 
 import { createLogger } from '@/lib/logger';
 
-import { openRouterBaseUrl } from './adapters/openrouter-image-adapter';
+import { openRouterBaseUrl } from './constants';
 import type { ImageModelInfo } from './types';
 
 const log = createLogger('OpenRouterModels');

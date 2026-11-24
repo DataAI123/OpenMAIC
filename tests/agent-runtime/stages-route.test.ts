@@ -83,8 +83,13 @@ describe('GET /api/stages', () => {
 
   it('answers 404 when the agent runtime is not configured', async () => {
     mocks.runtimeConfigured = false;
-    const response = await GET(new NextRequest('http://localhost/api/stages'));
+    const response = await GET(
+      new NextRequest('http://localhost/api/stages', {
+        headers: { 'x-request-id': 'stages-runtime-disabled' },
+      }),
+    );
     expect(response.status).toBe(404);
+    expect(response.headers.get('x-request-id')).toBe('stages-runtime-disabled');
     expect(mocks.resolveRequestOwnerId).not.toHaveBeenCalled();
   });
 
@@ -197,11 +202,15 @@ describe('POST /api/stages', () => {
     const response = await POST(
       new NextRequest('http://localhost/api/stages', {
         method: 'POST',
-        headers: { 'Content-Type': 'text/plain' },
+        headers: {
+          'Content-Type': 'text/plain',
+          'x-request-id': 'stages-invalid-json',
+        },
         body: 'not json',
       }),
     );
     expect(response.status).toBe(400);
+    expect(response.headers.get('x-request-id')).toBe('stages-invalid-json');
     expect(mocks.resolveRequestOwnerId).not.toHaveBeenCalled();
   });
 
@@ -210,10 +219,14 @@ describe('POST /api/stages', () => {
     const response = await POST(
       new NextRequest('http://localhost/api/stages', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'x-request-id': 'stages-post-runtime-disabled',
+        },
         body: JSON.stringify({ name: 'Day 1' }),
       }),
     );
     expect(response.status).toBe(404);
+    expect(response.headers.get('x-request-id')).toBe('stages-post-runtime-disabled');
   });
 });

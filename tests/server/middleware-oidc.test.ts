@@ -472,12 +472,36 @@ describe('OIDC middleware gates', () => {
     expect(personalUsage.status).toBe(401);
   });
 
+  it('stamps an x-request-id on edge rejections and adopts an upstream id', async () => {
+    configureOidc();
+    const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+    // A route the edge gate keeps closed: 503 before any handler runs.
+    const closed = await middleware(
+      new NextRequest('https://openmaic.example.com/api/generate/video', {
+        headers: { 'x-request-id': 'edge-trace-1' },
+      }),
+    );
+    expect(closed.status).toBe(503);
+    expect(closed.headers.get('x-request-id')).toBe('edge-trace-1');
+
+    // An admitted route without a session: 401 carries a freshly minted id.
+    const loginRequired = await middleware(
+      new NextRequest('https://openmaic.example.com/api/stages'),
+    );
+    expect(loginRequired.status).toBe(401);
+    expect(loginRequired.headers.get('x-request-id')).toMatch(uuid);
+  });
+
   it('redirects unauthenticated pages through the OIDC login route', async () => {
     configureOidc();
     const response = await middleware(
-      new NextRequest('https://openmaic.example.com/course?tab=recent'),
+      new NextRequest('https://openmaic.example.com/course?tab=recent', {
+        headers: { 'x-request-id': 'oidc-page:login' },
+      }),
     );
     expect(response.status).toBe(307);
+    expect(response.headers.get('x-request-id')).toBe('oidc-page:login');
     const location = new URL(response.headers.get('location')!);
     expect(location.pathname).toBe('/api/auth/login');
     expect(location.searchParams.get('returnTo')).toBe('/course?tab=recent');
@@ -510,6 +534,50 @@ describe('OIDC mode ignores the legacy access-code channel', () => {
     expect(verify.status).toBe(503);
   });
 
+  it('admits only the exact liveness GET/HEAD without a session', async () => {
+    configureOidc();
+
+    const live = await middleware(new NextRequest('https://openmaic.example.com/api/health/live'));
+    expect(live.status).toBe(200);
+
+    const head = await middleware(
+      new NextRequest('https://openmaic.example.com/api/health/live', { method: 'HEAD' }),
+    );
+    expect(head.status).toBe(200);
+
+    const post = await middleware(
+      new NextRequest('https://openmaic.example.com/api/health/live', { method: 'POST' }),
+    );
+    expect(post.status).toBe(503);
+    expect(post.headers.get('x-request-id')).toMatch(/^[A-Za-z0-9._:-]{1,128}$/);
+
+    const nested = await middleware(
+      new NextRequest('https://openmaic.example.com/api/health/live/details'),
+    );
+    expect(nested.status).toBe(503);
+  });
+
+  it('admits only the exact readiness GET/HEAD without a session', async () => {
+    configureOidc();
+
+    for (const method of ['GET', 'HEAD'] as const) {
+      const response = await middleware(
+        new NextRequest('https://openmaic.example.com/api/health/ready', { method }),
+      );
+      expect(response.status, method).toBe(200);
+    }
+
+    const post = await middleware(
+      new NextRequest('https://openmaic.example.com/api/health/ready', { method: 'POST' }),
+    );
+    expect(post.status).toBe(503);
+
+    const nested = await middleware(
+      new NextRequest('https://openmaic.example.com/api/health/ready/details'),
+    );
+    expect(nested.status).toBe(503);
+  });
+
   it('still requires an application session for the status probe and admits no other verb', async () => {
     configureOidc();
     const cookie = await sessionCookie();
@@ -538,5 +606,89 @@ describe('OIDC mode ignores the legacy access-code channel', () => {
       }),
     );
     expect(response.status).toBe(401);
+  });
+});
+
+describe('legacy access-code liveness gate', () => {
+  afterEach(() => vi.unstubAllEnvs());
+
+  it('allows only GET and HEAD on the exact public liveness path', async () => {
+    vi.stubEnv('OPENMAIC_AUTH_MODE', 'legacy');
+    vi.stubEnv('ACCESS_CODE', 'demo-code-that-is-long-enough');
+
+    for (const method of ['GET', 'HEAD'] as const) {
+      const response = await middleware(
+        new NextRequest('https://openmaic.example.com/api/health/live', { method }),
+      );
+      expect(response.status, method).toBe(200);
+    }
+
+    const post = await middleware(
+      new NextRequest('https://openmaic.example.com/api/health/live', { method: 'POST' }),
+    );
+    expect(post.status).toBe(401);
+
+    const nested = await middleware(
+      new NextRequest('https://openmaic.example.com/api/health/live/details'),
+    );
+    expect(nested.status).toBe(401);
+  });
+
+  it('allows only GET and HEAD on the exact public readiness path', async () => {
+    vi.stubEnv('OPENMAIC_AUTH_MODE', 'legacy');
+    vi.stubEnv('ACCESS_CODE', 'demo-code-that-is-long-enough');
+
+    for (const method of ['GET', 'HEAD'] as const) {
+      const response = await middleware(
+        new NextRequest('https://openmaic.example.com/api/health/ready', { method }),
+      );
+      expect(response.status, method).toBe(200);
+    }
+
+    const post = await middleware(
+      new NextRequest('https://openmaic.example.com/api/health/ready', { method: 'POST' }),
+    );
+    expect(post.status).toBe(401);
+
+    const nested = await middleware(
+      new NextRequest('https://openmaic.example.com/api/health/ready/details'),
+    );
+    expect(nested.status).toBe(401);
+  });
+
+  it('stamps the access-code gate rejection with a normalized request id', async () => {
+    vi.stubEnv('OPENMAIC_AUTH_MODE', 'legacy');
+    vi.stubEnv('ACCESS_CODE', 'demo-code-that-is-long-enough');
+    const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+    const upstream = await middleware(
+      new NextRequest('https://openmaic.example.com/api/stages', {
+        headers: { 'x-request-id': 'legacy-gate:denied' },
+      }),
+    );
+    const malformed = await middleware(
+      new NextRequest('https://openmaic.example.com/api/stages', {
+        headers: { 'x-request-id': 'invalid id' },
+      }),
+    );
+
+    expect(upstream.status).toBe(401);
+    expect(upstream.headers.get('x-request-id')).toBe('legacy-gate:denied');
+    expect(malformed.status).toBe(401);
+    expect(malformed.headers.get('x-request-id')).toMatch(uuid);
+  });
+
+  it('stamps the disabled-workbench rejection before returning its 404', async () => {
+    vi.stubEnv('NEXT_PUBLIC_PRO_WORKBENCH_ENABLED', 'false');
+    vi.stubEnv('OPENMAIC_AUTH_MODE', 'legacy');
+
+    const response = await middleware(
+      new NextRequest('https://openmaic.example.com/workbench', {
+        headers: { 'x-request-id': 'workbench:disabled' },
+      }),
+    );
+
+    expect(response.status).toBe(404);
+    expect(response.headers.get('x-request-id')).toBe('workbench:disabled');
   });
 });

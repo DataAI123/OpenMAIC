@@ -3,24 +3,23 @@ import { NextRequest } from 'next/server';
 
 const mocks = vi.hoisted(() => ({
   getSession: vi.fn(),
+  getAgentSessionStore: vi.fn(),
   readEventsAfterForReplay: vi.fn(),
   resolveRequestOwnerId: vi.fn(),
   wake: undefined as undefined | (() => void),
   unsubscribeWakeup: vi.fn(),
+  runtimeConfigured: true,
 }));
 
 vi.mock('@/lib/config/feature-flags', () => ({
   isAgentRuntimeEnabled: () => true,
-  isAgentRuntimeConfigured: () => true,
+  isAgentRuntimeConfigured: () => mocks.runtimeConfigured,
 }));
 vi.mock('@/lib/server/agent-runtime/owner', () => ({
   resolveRequestOwnerId: mocks.resolveRequestOwnerId,
 }));
 vi.mock('@/lib/server/agent-runtime/store', () => ({
-  getAgentSessionStore: vi.fn(async () => ({
-    getSession: mocks.getSession,
-    readEventsAfterForReplay: mocks.readEventsAfterForReplay,
-  })),
+  getAgentSessionStore: mocks.getAgentSessionStore,
 }));
 vi.mock('@/lib/server/agent-runtime/event-notify-bus', () => ({
   subscribeAgentEventWakeup: vi.fn((_route, wake: () => void) => {
@@ -75,16 +74,61 @@ beforeEach(() => {
   vi.useFakeTimers();
   vi.clearAllMocks();
   mocks.wake = undefined;
+  mocks.runtimeConfigured = true;
+  mocks.getAgentSessionStore.mockResolvedValue({
+    getSession: mocks.getSession,
+    readEventsAfterForReplay: mocks.readEventsAfterForReplay,
+  });
   mocks.getSession.mockResolvedValue({ id: 'session-1', ownerId: 'user:mine' });
   mocks.resolveRequestOwnerId.mockReturnValue('user:mine');
   mocks.readEventsAfterForReplay.mockResolvedValue({ events: [], scanned: 0 });
 });
 
 afterEach(() => {
+  vi.restoreAllMocks();
   vi.useRealTimers();
 });
 
 describe('GET per-session events', () => {
+  it('correlates the runtime-disabled early 404', async () => {
+    mocks.runtimeConfigured = false;
+    const response = await GET(
+      new NextRequest('http://localhost/api/agent/sessions/session-1/events', {
+        headers: { 'x-request-id': 'session-events-disabled' },
+      }),
+      { params: Promise.resolve({ id: 'session-1' }) },
+    );
+
+    expect(response.status).toBe(404);
+    expect(response.headers.get('x-request-id')).toBe('session-events-disabled');
+    expect(mocks.resolveRequestOwnerId).not.toHaveBeenCalled();
+  });
+
+  it('returns a correlated service-unavailable response if session lookup fails', async () => {
+    mocks.getSession.mockRejectedValueOnce(new Error('database password leaked'));
+    const errorLog = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    const response = await GET(
+      new NextRequest('http://localhost/api/agent/sessions/session-1/events', {
+        headers: { 'x-request-id': 'session-events-store-failed' },
+      }),
+      { params: Promise.resolve({ id: 'session-1' }) },
+    );
+
+    expect(response.status).toBe(503);
+    expect(response.headers.get('x-request-id')).toBe('session-events-store-failed');
+    await expect(response.json()).resolves.toEqual({
+      success: false,
+      errorCode: 'UPSTREAM_ERROR',
+      error: 'Agent event stream is unavailable',
+    });
+    expect(errorLog).toHaveBeenCalledWith(
+      '[agent-runtime] failed to prepare session event stream (requestId=session-events-store-failed)',
+      'Error',
+    );
+    errorLog.mockRestore();
+  });
+
   it('preserves an anonymous owner cookie on the SSE response', async () => {
     mocks.resolveRequestOwnerId.mockImplementationOnce((_request, responseHeaders: Headers) => {
       responseHeaders.set('Set-Cookie', 'anonymous_id=test; Path=/; HttpOnly');
@@ -155,6 +199,36 @@ describe('GET per-session events', () => {
     expect(mocks.readEventsAfterForReplay).toHaveBeenCalledTimes(2);
     await reader.cancel();
     expect(mocks.unsubscribeWakeup).toHaveBeenCalledOnce();
+  });
+
+  it('cancels an in-flight poll without rescheduling or retaining stream resources', async () => {
+    const response = await call();
+    const reader = response.body!.getReader();
+    await readChunk(reader);
+    await readChunk(reader);
+
+    let releasePoll!: () => void;
+    mocks.readEventsAfterForReplay.mockImplementationOnce(async () => {
+      await new Promise<void>((resolve) => {
+        releasePoll = resolve;
+      });
+      return {
+        events: [{ id: 1, ts: 123, attempt: 1, type: 'message_update', data: { text: 'late' } }],
+        scanned: 1,
+      };
+    });
+    await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS);
+    expect(mocks.readEventsAfterForReplay).toHaveBeenCalledTimes(2);
+
+    await reader.cancel();
+    expect(vi.getTimerCount()).toBe(0);
+    expect(mocks.unsubscribeWakeup).toHaveBeenCalledOnce();
+    releasePoll();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(mocks.readEventsAfterForReplay).toHaveBeenCalledTimes(2);
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it('converges within the 5s polling interval', async () => {

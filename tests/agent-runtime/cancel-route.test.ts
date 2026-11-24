@@ -2,13 +2,14 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { NextRequest } from 'next/server';
 
 const mocks = vi.hoisted(() => ({
+  runtimeConfigured: true,
   getSession: vi.fn(),
   requestCancel: vi.fn(),
 }));
 
 vi.mock('@/lib/config/feature-flags', () => ({
   isAgentRuntimeEnabled: () => true,
-  isAgentRuntimeConfigured: () => true,
+  isAgentRuntimeConfigured: () => mocks.runtimeConfigured,
 }));
 vi.mock('@/lib/server/agent-runtime/owner', () => ({
   resolveRequestOwnerId: () => 'owner-1',
@@ -30,10 +31,24 @@ function call() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mocks.runtimeConfigured = true;
   mocks.getSession.mockResolvedValue({ id: 'session-1', ownerId: 'owner-1', status: 'running' });
 });
 
 describe('POST agent session cancellation', () => {
+  it('correlates the runtime-disabled response', async () => {
+    mocks.runtimeConfigured = false;
+    const response = await POST(
+      new NextRequest('http://localhost/api/agent/sessions/session-1/cancel', {
+        headers: { 'x-request-id': 'session-cancel-off' },
+      }),
+      { params: Promise.resolve({ id: 'session-1' }) },
+    );
+    expect(response.status).toBe(404);
+    expect(response.headers.get('x-request-id')).toBe('session-cancel-off');
+    expect(mocks.getSession).not.toHaveBeenCalled();
+  });
+
   it('durably requests cancellation for an owned live session', async () => {
     const response = await call();
 

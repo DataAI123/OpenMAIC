@@ -19,6 +19,7 @@ import {
   UserApiRateLimitExceededError,
 } from '@/lib/server/user-api-rate-limit';
 import { resolveAuthConfig } from '@/lib/server/auth/config';
+import { stampRequestId } from '@/lib/server/request-id';
 const log = createLogger('Transcription');
 
 export const maxDuration = 60;
@@ -122,9 +123,12 @@ export async function POST(req: NextRequest) {
   try {
     oidcMode = resolveAuthConfig().mode === 'oidc';
   } catch {
-    return apiError('INTERNAL_ERROR', 503, 'Transcription is unavailable.');
+    return stampRequestId(
+      apiError('INTERNAL_ERROR', 503, 'Transcription is unavailable.'),
+      req.headers,
+    );
   }
-  if (!oidcMode) return handlePost(req, false);
+  if (!oidcMode) return stampRequestId(await handlePost(req, false), req.headers);
 
   return withRequestOwnerId(req, async (ownerId, responseHeaders) => {
     responseHeaders.set('Cache-Control', 'private, no-store');

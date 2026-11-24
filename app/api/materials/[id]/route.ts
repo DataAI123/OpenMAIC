@@ -15,6 +15,7 @@ import type { NextRequest } from 'next/server';
 
 import { isAgentRuntimeConfigured } from '@/lib/config/feature-flags';
 import { apiError } from '@/lib/server/api-response';
+import { stampRequestId } from '@/lib/server/request-id';
 import {
   getSessionMaterial,
   publicMaterialView,
@@ -28,10 +29,17 @@ export const runtime = 'nodejs';
 type Params = { params: Promise<{ id: string }> };
 
 export async function GET(req: NextRequest, { params }: Params) {
-  if (!isAgentRuntimeConfigured()) return new Response('Not found', { status: 404 });
+  if (!isAgentRuntimeConfigured()) {
+    return stampRequestId(new Response('Not found', { status: 404 }), req.headers);
+  }
 
   const sessionId = new URL(req.url).searchParams.get('sessionId')?.trim();
-  if (!sessionId) return apiError('MISSING_REQUIRED_FIELD', 400, 'sessionId is required');
+  if (!sessionId) {
+    return stampRequestId(
+      apiError('MISSING_REQUIRED_FIELD', 400, 'sessionId is required'),
+      req.headers,
+    );
+  }
 
   return withRequestOwnerId(req, async (ownerId, responseHeaders) => {
     const session = await resolveOwnedSession(sessionId, ownerId);
